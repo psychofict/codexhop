@@ -1,0 +1,92 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (${{ matrix.os }}, python ${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python: ["3.9", "3.13"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python }}
+      - name: compile
+        run: python -m py_compile codexhop.py
+      - name: test
+        run: python -m unittest discover -s test -v
+
+  package:
+    name: build and install the package
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.9"
+      - run: pip install build
+      - name: build sdist and wheel
+        run: python -m build
+      - name: install the wheel and run it
+        run: |
+          set -euo pipefail
+          pip install dist/*.whl
+          codexhop --version | grep -qx "codexhop $(python -c 'import codexhop;print(codexhop.VERSION)')"
+          codexhop shell-init | bash -n -          # the glue it hands to pip users must parse
+          CODEXHOP_OFFLINE=1 CODEX_HOME="$RUNNER_TEMP/c" codexhop doctor --json | python -c 'import json,sys;json.load(sys.stdin)'
+      - name: the sdist carries the installer, the docs and the tests
+        run: |
+          set -euo pipefail
+          # List once into a variable and match without a pipe: `tar | grep -q`
+          # races, because grep exits on the first hit while tar keeps writing.
+          files="$(tar tzf dist/*.tar.gz)"
+          for want in install.sh test/test_codexhop.py docs/how-it-works.md docs/commands.md \
+                      docs/experiments/session-follows-hop.py; do
+            case "$files" in
+              *"$want"*) ;;
+              *) echo "the sdist is missing $want"; exit 1 ;;
+            esac
+          done
+
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+      - run: pip install ruff
+      - name: ruff
+        run: ruff check codexhop.py test/ docs/experiments/
+      - name: shellcheck
+        run: shellcheck -S warning install.sh
+      - name: install and uninstall cleanly
+        run: |
+          set -euo pipefail
+          export CODEXHOP_BIN_DIR="$RUNNER_TEMP/bin" PATH="$RUNNER_TEMP/bin:$PATH"
+          printf 'export FOO=1\n' > "$RUNNER_TEMP/rc"
+          ./install.sh --rc "$RUNNER_TEMP/rc"
+          test -x "$RUNNER_TEMP/bin/codexhop"
+          test "$(grep -c 'codexhop shell-init' "$RUNNER_TEMP/rc")" = 1
+          ./install.sh --rc "$RUNNER_TEMP/rc"                  # idempotent
+          test "$(grep -c 'codexhop shell-init' "$RUNNER_TEMP/rc")" = 1
+          grep -q 'export FOO=1' "$RUNNER_TEMP/rc"             # the rest of the file is kept
+          bash -c "source '$RUNNER_TEMP/rc' 2>/dev/null; true"
+          ./install.sh --uninstall --rc "$RUNNER_TEMP/rc"
+          ! grep -q 'codexhop shell-init' "$RUNNER_TEMP/rc"
+          test ! -e "$RUNNER_TEMP/bin/codexhop"

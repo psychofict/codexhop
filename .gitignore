@@ -1,0 +1,13 @@
+# Never let a login into the repo.
+auth.json
+accounts/
+*.token
+*.bak
+__pycache__/
+*.pyc
+.ruff_cache/
+
+# Build artefacts.
+build/
+dist/
+*.egg-info/

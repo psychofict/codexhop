@@ -1,0 +1,6 @@
+# The wheel is one module. The sdist also carries the repo installer, the docs
+# (with the experiment that measured what open sessions do) and the tests.
+include LICENSE CHANGELOG.md CONTRIBUTING.md SECURITY.md SUPPORT.md CODE_OF_CONDUCT.md install.sh
+recursive-include docs *
+include test/test_codexhop.py
+global-exclude __pycache__ *.py[cod]

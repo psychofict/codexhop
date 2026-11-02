@@ -1,0 +1,145 @@
+# Output of docs/experiments/session-follows-hop.py, 2 November 2026, Linux (Ubuntu, kernel 6.14),
+# run under unshare -rn against codex-cli 0.160.1 and 0.166.0 (the x86_64-unknown-linux-musl builds).
+# Lines about plugins, model lists, analytics and the WebSocket retries are left out; the
+# script prints every request when run by hand.
+
+
+=== follow  (codex-cli 0.160.1)
+  note     6.9s  codexhop bob: exit 0; switched to bob (bob@example.com, pro) | new `codex` sessions start as this account. | note: Codex 0.160.1 can save an open session's renewal over the new login. `codexhop doctor` checks for that; Codex 0.164.0 or later cannot. | note: 1 codex session(s) open (pid N) keep using the 'ann' login until it is next due for renewal, in about 9d23h, then stop with "signed in to another account". Restart them to move them over (`codex resume` picks a conversation back up).
+    6.8s POST /backend-api/codex/responses             login=A   workspace=ws-a
+    7.0s POST /backend-api/codex/responses             login=A   workspace=ws-a
+  codex exit 0
+  codex> done
+  codex> done
+  auth.json after: tokens of login B, account_id field ws-b, refresh_token rt-B
+  codexhop doctor:
+      warn  Codex 0.160.1 does not check that auth.json still holds the same login when it saves a renewal, so a hop during a renewal can mix two logins in one file. codexhop files every login by its tokens and this check repairs such a file; Codex 0.164.0 or later closes the gap
+
+=== renew-after  (codex-cli 0.160.1)
+  note   first request: A's token has 312s left (window is 300s)
+  note     6.8s  codexhop bob: exit 1; error: the live login (ann@example.com) is due for renewal and 1 codex session(s) have it open (pid N). The next request one of them makes renews it, and a hop that lands during that renewal can cost the account its login. Hop once that session has made its next request, or close it first, or pass --yes.
+  note     6.9s  codexhop bob --yes: exit 0; switched to bob (bob@example.com, pro) | new `codex` sessions start as this account. | note: Codex 0.160.1 can save an open session's renewal over the new login. `codexhop doctor` checks for that; Codex 0.164.0 or later cannot. | note: 1 codex session(s) open (pid N) keep using the 'ann' login until it is next due for renewal, any moment now, then stop with "signed in to another account". Restart them to move them over (`codex resume` picks a conversation back up).
+    6.8s POST /backend-api/codex/responses             login=A   workspace=ws-a
+   22.8s POST /backend-api/codex/responses             login=A   workspace=ws-a
+  codex exit 1
+  codex> ERROR: Your access token could not be refreshed because you have since logged out or signed in to another account. Please sign in again.
+  codex> ERROR: Your access token could not be refreshed because you have since logged out or signed in to another account. Please sign in again.
+  auth.json after: tokens of login B, account_id field ws-b, refresh_token rt-B
+  codexhop doctor:
+      warn  Codex 0.160.1 does not check that auth.json still holds the same login when it saves a renewal, so a hop during a renewal can mix two logins in one file. codexhop files every login by its tokens and this check repairs such a file; Codex 0.164.0 or later closes the gap
+      warn  due for renewal: ann; `codexhop renew`
+
+=== renew-during  (codex-cli 0.160.1)
+  note     0.1s  codexhop bob: exit 1; error: the live login (ann@example.com) is due for renewal and 1 codex session(s) have it open (pid N). The next request one of them makes renews it, and a hop that lands during that renewal can cost the account its login. Hop once that session has made its next request, or close it first, or pass --yes.
+  note     0.2s  codexhop bob --yes: exit 0; switched to bob (bob@example.com, pro) | new `codex` sessions start as this account. | note: Codex 0.160.1 can save an open session's renewal over the new login. `codexhop doctor` checks for that; Codex 0.164.0 or later cannot. | note: 1 codex session(s) open (pid N) keep using the 'ann' login until it is next due for renewal, any moment now, then stop with "signed in to another account". Restart them to move them over (`codex resume` picks a conversation back up).
+  note     7.0s  auth.json once Codex saved its renewal: tokens of login A2, account_id field ws-b
+    0.0s POST /oauth/token                             login=-   workspace=- refresh_token=rt-A
+    7.0s POST /backend-api/codex/responses             login=A2  workspace=ws-b
+    7.1s POST /backend-api/codex/responses             login=A2  workspace=ws-b
+  codex exit 0
+  codex> done
+  codex> done
+  auth.json after: tokens of login A2, account_id field ws-b, refresh_token rt-A2
+  codexhop doctor:
+      warn  Codex 0.160.1 does not check that auth.json still holds the same login when it saves a renewal, so a hop during a renewal can mix two logins in one file. codexhop files every login by its tokens and this check repairs such a file; Codex 0.164.0 or later closes the gap
+      error  auth.json holds tokens for ann@example.com (workspace ws-a) under the account_id of workspace ws-b, so Codex sends the wrong workspace; --fix files the tokens under their own account
+  codexhop doctor --fix:
+      warn  Codex 0.160.1 does not check that auth.json still holds the same login when it saves a renewal, so a hop during a renewal can mix two logins in one file. codexhop files every login by its tokens and this check repairs such a file; Codex 0.164.0 or later closes the gap
+      warn  auth.json held tokens of one workspace under another's account_id [filed its tokens under 'ann' and put 'bob' back]
+  after the fix: ann holds login A2 (rt-A2); auth.json holds B, account_id field ws-b
+
+=== same-workspace  (codex-cli 0.160.1)
+  note   first request: A's token has 313s left (window is 300s)
+  note     6.7s  codexhop bob: exit 1; error: the live login (ann@example.com) is due for renewal and 1 codex session(s) have it open (pid N). The next request one of them makes renews it, and a hop that lands during that renewal can cost the account its login. Hop once that session has made its next request, or close it first, or pass --yes.
+  note     6.8s  codexhop bob --yes: exit 0; switched to bob (bob@example.com, plus) | new `codex` sessions start as this account. | note: Codex 0.160.1 can save an open session's renewal over the new login. `codexhop doctor` checks for that; Codex 0.164.0 or later cannot. | note: 1 codex session(s) open (pid N) keep using the 'ann' login until it is next due for renewal, any moment now, then carry on as 'bob', which is in the same workspace.
+    6.6s POST /backend-api/codex/responses             login=A   workspace=ws-a
+   23.6s POST /backend-api/codex/responses             login=B   workspace=ws-a
+  codex exit 0
+  codex> done
+  codex> done
+  auth.json after: tokens of login B, account_id field ws-a, refresh_token rt-B
+  codexhop doctor:
+      warn  Codex 0.160.1 does not check that auth.json still holds the same login when it saves a renewal, so a hop during a renewal can mix two logins in one file. codexhop files every login by its tokens and this check repairs such a file; Codex 0.164.0 or later closes the gap
+      warn  due for renewal: ann; `codexhop renew`
+
+=== run-home  (codex-cli 0.160.1)
+  note    12.1s  plain codex exec done; now codexhop run bob exec
+    6.8s POST /backend-api/codex/responses             login=A   workspace=ws-a
+    6.9s POST /backend-api/codex/responses             login=A   workspace=ws-a
+   18.8s POST /backend-api/codex/responses             login=B   workspace=ws-b
+  codex exit 0
+  codex> done
+  codex> done
+  auth.json after: tokens of login A, account_id field ws-a, refresh_token rt-A
+  codexhop doctor:
+      warn  Codex 0.160.1 does not check that auth.json still holds the same login when it saves a renewal, so a hop during a renewal can mix two logins in one file. codexhop files every login by its tokens and this check repairs such a file; Codex 0.164.0 or later closes the gap
+  run home, entries that are not links: .codexhop-pids, .codexhop-run, auth.json, auth.lock
+  real home, database files: goals_1.sqlite, goals_1.sqlite-shm, goals_1.sqlite-wal, logs_2.sqlite, memories_1.sqlite, queue_1.sqlite, state_5.sqlite, thread_history_1.sqlite, thread_history_1.sqlite-shm, thread_history_1.sqlite-wal
+
+=== follow  (codex-cli 0.166.0)
+  note     7.4s  codexhop bob: exit 0; switched to bob (bob@example.com, pro) | new `codex` sessions start as this account. | note: 1 codex session(s) open (pid N) keep using the 'ann' login until it is next due for renewal, in about 9d23h, then stop with "signed in to another account". Restart them to move them over (`codex resume` picks a conversation back up).
+    7.3s POST /backend-api/codex/responses             login=A   workspace=ws-a
+    7.4s POST /backend-api/codex/responses             login=A   workspace=ws-a
+  codex exit 0
+  codex> done
+  codex> done
+  auth.json after: tokens of login B, account_id field ws-b, refresh_token rt-B
+  codexhop doctor:
+    no problems found
+
+=== renew-after  (codex-cli 0.166.0)
+  note   first request: A's token has 312s left (window is 300s)
+  note     7.1s  codexhop bob: exit 1; error: the live login (ann@example.com) is due for renewal and 1 codex session(s) have it open (pid N). The next request one of them makes renews it, and a hop that lands during that renewal can cost the account its login. Hop once that session has made its next request, or close it first, or pass --yes.
+  note     7.2s  codexhop bob --yes: exit 0; switched to bob (bob@example.com, pro) | new `codex` sessions start as this account. | note: 1 codex session(s) open (pid N) keep using the 'ann' login until it is next due for renewal, any moment now, then stop with "signed in to another account". Restart them to move them over (`codex resume` picks a conversation back up).
+    7.0s POST /backend-api/codex/responses             login=A   workspace=ws-a
+   23.3s POST /backend-api/codex/responses             login=A   workspace=ws-a
+  codex exit 1
+  codex> ERROR: Your access token could not be refreshed because you have since logged out or signed in to another account. Please sign in again.
+  codex> ERROR: Your access token could not be refreshed because you have since logged out or signed in to another account. Please sign in again.
+  auth.json after: tokens of login B, account_id field ws-b, refresh_token rt-B
+  codexhop doctor:
+      warn  due for renewal: ann; `codexhop renew`
+
+=== renew-during  (codex-cli 0.166.0)
+  note     0.1s  codexhop bob: exit 1; error: the live login (ann@example.com) is due for renewal and 1 codex session(s) have it open (pid N). The next request one of them makes renews it, and a hop that lands during that renewal can cost the account its login. Hop once that session has made its next request, or close it first, or pass --yes.
+  note     0.2s  codexhop bob --yes: exit 0; switched to bob (bob@example.com, pro) | new `codex` sessions start as this account. | note: 1 codex session(s) open (pid N) keep using the 'ann' login until it is next due for renewal, any moment now, then stop with "signed in to another account". Restart them to move them over (`codex resume` picks a conversation back up).
+  note     7.4s  auth.json once Codex saved its renewal: tokens of login B, account_id field ws-b
+    0.0s POST /oauth/token                             login=-   workspace=- refresh_token=rt-A
+    7.4s POST /backend-api/codex/responses             login=B   workspace=ws-b
+    7.5s POST /backend-api/codex/responses             login=B   workspace=ws-b
+  codex exit 0
+  codex> done
+  codex> done
+  auth.json after: tokens of login B, account_id field ws-b, refresh_token rt-B
+  codexhop doctor:
+      warn  due for renewal: ann; `codexhop renew`
+  codexhop doctor --fix:
+      warn  due for renewal: ann; `codexhop renew`
+  after the fix: ann holds login A (rt-A); auth.json holds B, account_id field ws-b
+
+=== same-workspace  (codex-cli 0.166.0)
+  note   first request: A's token has 312s left (window is 300s)
+  note     7.4s  codexhop bob: exit 1; error: the live login (ann@example.com) is due for renewal and 1 codex session(s) have it open (pid N). The next request one of them makes renews it, and a hop that lands during that renewal can cost the account its login. Hop once that session has made its next request, or close it first, or pass --yes.
+  note     7.4s  codexhop bob --yes: exit 0; switched to bob (bob@example.com, plus) | new `codex` sessions start as this account. | note: 1 codex session(s) open (pid N) keep using the 'ann' login until it is next due for renewal, any moment now, then carry on as 'bob', which is in the same workspace.
+    7.3s POST /backend-api/codex/responses             login=A   workspace=ws-a
+   23.7s POST /backend-api/codex/responses             login=B   workspace=ws-a
+  codex exit 0
+  codex> done
+  codex> done
+  auth.json after: tokens of login B, account_id field ws-a, refresh_token rt-B
+  codexhop doctor:
+      warn  due for renewal: ann; `codexhop renew`
+
+=== run-home  (codex-cli 0.166.0)
+  note    12.4s  plain codex exec done; now codexhop run bob exec
+    7.1s POST /backend-api/codex/responses             login=A   workspace=ws-a
+    7.3s POST /backend-api/codex/responses             login=A   workspace=ws-a
+   19.8s POST /backend-api/codex/responses             login=B   workspace=ws-b
+  codex exit 0
+  codex> done
+  codex> done
+  auth.json after: tokens of login A, account_id field ws-a, refresh_token rt-A
+  codexhop doctor:
+    no problems found
+  run home, entries that are not links: .codexhop-pids, .codexhop-run, auth.json, auth.lock
+  real home, database files: goals_1.sqlite, goals_1.sqlite-shm, goals_1.sqlite-wal, logs_2.sqlite, memories_1.sqlite, queue_1.sqlite, state_5.sqlite, state_5.sqlite-shm, state_5.sqlite-wal, thread_history_1.sqlite

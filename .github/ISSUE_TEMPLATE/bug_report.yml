@@ -1,0 +1,41 @@
+name: Bug report
+description: Something didn't work
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Never paste a token, an `auth.json`, or the contents of
+        `~/.codex/codexhop/`.** `codexhop doctor` prints no tokens, so it is
+        safe to paste; edit out an email address if you would rather not share it.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you ran, what you expected, what you got.
+      placeholder: |
+        $ chop work
+        ...
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Output of `codexhop doctor`
+      render: text
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: OS and shell
+      placeholder: macOS 15.4, zsh 5.9
+    validations:
+      required: true
+  - type: input
+    id: versions
+    attributes:
+      label: python3 and Codex versions
+      placeholder: python 3.12.3, codex-cli 0.166.0
+    validations:
+      required: true

@@ -1,0 +1,878 @@
+"""Tests for codexhop. Standard library only: python3 -m unittest discover -s test
+
+Every test runs the real command in a subprocess against a throwaway HOME and
+CODEX_HOME. The logins are made-up JWTs (unsigned, which codexhop never
+checks), the token and usage endpoints are a local fake server, and `codex` is a
+small script that records how it was called. Nothing leaves the machine.
+
+TEST_PYTHON picks the interpreter that runs codexhop (default: this one), so
+the same suite checks the oldest supported Python: TEST_PYTHON=python3.9.
+"""
+
+from __future__ import annotations
+
+import base64
+import http.server
+import importlib.util
+import json
+import os
+import shutil
+import stat
+import subprocess
+import sys
+import tempfile
+import textwrap
+import threading
+import time
+import unittest
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+TOOL = os.path.join(ROOT, "codexhop.py")
+PYTHON = shutil.which(os.environ.get("TEST_PYTHON") or "") or sys.executable
+AUTH = "https://api.openai.com/auth"
+
+
+def b64(data: dict) -> str:
+    return base64.urlsafe_b64encode(json.dumps(data).encode()).decode().rstrip("=")
+
+
+def jwt(claims: dict) -> str:
+    return f"{b64({'alg': 'none'})}.{b64(claims)}.sig"
+
+
+_SERIAL = [0]
+
+
+def login(email="a@example.com", user="user-a", account="ws-a", plan="plus",
+          iat=None, life=240 * 3600, last_refresh=None, field=None) -> dict:
+    """An auth.json as Codex writes it, for a made-up ChatGPT login."""
+    _SERIAL[0] += 1
+    iat = int(time.time()) - 60 if iat is None else int(iat)
+    claims = {AUTH: {"chatgpt_user_id": user, "user_id": user, "chatgpt_account_id": account,
+                     "chatgpt_plan_type": plan}}
+    tag = f"{user}-{account}-{_SERIAL[0]}"
+    return {
+        "auth_mode": "chatgpt",
+        "OPENAI_API_KEY": None,
+        "tokens": {
+            "id_token": jwt({"email": email, "iat": iat, "exp": iat + 3600, **claims}),
+            "access_token": jwt({"iat": iat, "exp": iat + life, "at": tag, **claims,
+                                 "https://api.openai.com/profile": {"email": email}}),
+            "refresh_token": f"rt-{tag}",
+            "account_id": field or account,
+        },
+        "last_refresh": last_refresh or time.strftime("%Y-%m-%dT%H:%M:%S.123456789Z", time.gmtime(iat)),
+    }
+
+
+A = dict(email="ann@example.com", user="user-a", account="ws-a", plan="plus")
+B = dict(email="bob@example.com", user="user-b", account="ws-b", plan="pro")
+C = dict(email="cat@example.com", user="user-c", account="ws-c", plan="team")
+
+
+def secrets_in(doc: dict) -> list[str]:
+    t = doc.get("tokens") or {}
+    return [v for v in (t.get("id_token"), t.get("access_token"), t.get("refresh_token"),
+                        doc.get("OPENAI_API_KEY")) if v]
+
+
+# ------------------------------------------------------------------ fake server
+
+
+class FakeServer:
+    """The token endpoint and the usage endpoint, on 127.0.0.1."""
+
+    def __init__(self):
+        self.refresh: dict = {}  # refresh token -> new auth.json, or (status, body)
+        self.usage: dict = {}  # access token -> (status, body, headers)
+        self.calls: list = []
+        server = self
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def reply(self, status, body, headers=None):
+                raw = json.dumps(body).encode()
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                for k, v in (headers or {}).items():
+                    self.send_header(k, v)
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+
+            def do_POST(self):
+                n = int(self.headers.get("Content-Length") or 0)
+                body = json.loads(self.rfile.read(n) or b"{}")
+                headers = {k.lower(): v for k, v in self.headers.items()}
+                server.calls.append(("POST", self.path, headers, body))
+                got = server.refresh.get(body.get("refresh_token"))
+                if isinstance(got, dict):
+                    t = got["tokens"]
+                    self.reply(200, {"id_token": t["id_token"], "access_token": t["access_token"],
+                                     "refresh_token": t["refresh_token"]})
+                elif isinstance(got, tuple):
+                    self.reply(*got)
+                else:
+                    self.reply(401, {"error": {"code": "refresh_token_invalidated", "message": "nope"}})
+
+            def do_GET(self):
+                server.calls.append(("GET", self.path, {k.lower(): v for k, v in self.headers.items()}, None))
+                tok = (self.headers.get("Authorization") or "").replace("Bearer ", "")
+                got = server.usage.get(tok)
+                if got is None:
+                    self.reply(401, {"detail": "unknown token"})
+                else:
+                    self.reply(*got)
+
+        self.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.port = self.httpd.server_address[1]
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+
+    def url(self, path: str) -> str:
+        return f"http://127.0.0.1:{self.port}{path}"
+
+    def stop(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
+
+def usage_body(short=10.0, long=20.0, plan="plus", reset_in=3600, reached=False):
+    now = int(time.time())
+    return {
+        "plan_type": plan,
+        "rate_limit": {
+            "allowed": True, "limit_reached": reached,
+            "primary_window": {"used_percent": short, "limit_window_seconds": 18000,
+                               "reset_after_seconds": reset_in, "reset_at": now + reset_in},
+            "secondary_window": {"used_percent": long, "limit_window_seconds": 604800,
+                                 "reset_after_seconds": 86400, "reset_at": now + 86400},
+        },
+        "additional_rate_limits": [],
+        "credits": {"has_credits": False, "unlimited": False, "balance": None},
+    }
+
+
+FAKE_CODEX = textwrap.dedent('''\
+    #!/usr/bin/env python3
+    """A stand-in for `codex` that records how it was called."""
+    import json, os, sys
+    log = os.environ.get("FAKE_CODEX_LOG")
+    home = os.environ.get("CODEX_HOME", "")
+    if log:
+        with open(log, "a") as f:
+            f.write(json.dumps({"argv": sys.argv[1:], "home": home}) + "\\n")
+    if sys.argv[1:2] == ["--version"]:
+        print("codex-cli " + os.environ.get("FAKE_CODEX_VERSION", "0.166.0"))
+        sys.exit(0)
+    if sys.argv[1:2] == ["login"]:
+        cfg = open(os.path.join(home, "config.toml")).read()
+        assert 'cli_auth_credentials_store = "file"' in cfg, cfg
+        src = os.environ.get("FAKE_CODEX_LOGIN")
+        if src:
+            with open(src) as f, open(os.path.join(home, "auth.json"), "w") as g:
+                g.write(f.read())
+        sys.exit(0)
+    rotate = os.environ.get("FAKE_CODEX_ROTATE")
+    if rotate:
+        with open(rotate) as f, open(os.path.join(home, "auth.json"), "w") as g:
+            g.write(f.read())
+    sys.exit(int(os.environ.get("FAKE_CODEX_EXIT", "0")))
+''')
+
+
+# ------------------------------------------------------------------- the tests
+
+
+class Base(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.server = FakeServer()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.stop()
+
+    def setUp(self):
+        self.server.refresh.clear()
+        self.server.usage.clear()
+        self.server.calls.clear()
+        self.tmp = tempfile.mkdtemp(prefix="codexhop-test-")
+        self.home = os.path.join(self.tmp, "home")
+        self.codex_home = os.path.join(self.home, ".codex")
+        self.bin = os.path.join(self.tmp, "bin")
+        os.makedirs(self.codex_home)
+        os.makedirs(self.bin)
+        fake = os.path.join(self.bin, "codex")
+        with open(fake, "w") as f:
+            f.write(FAKE_CODEX.replace("#!/usr/bin/env python3", f"#!{sys.executable}", 1))
+        os.chmod(fake, 0o755)
+        self.log = os.path.join(self.tmp, "codex.log")
+        self.store = os.path.join(self.codex_home, "codexhop")
+        self.children: list = []
+        self.env = {
+            "HOME": self.home,
+            "PATH": self.bin + os.pathsep + "/usr/bin:/bin",
+            "CODEX_HOME": self.codex_home,
+            "CODEX_REFRESH_TOKEN_URL_OVERRIDE": self.server.url("/oauth/token"),
+            "CODEXHOP_USAGE_URL": self.server.url("/backend-api/wham/usage"),
+            "CODEXHOP_LOCK_WAIT": "1",
+            "FAKE_CODEX_LOG": self.log,
+            "NO_COLOR": "1",
+            "LANG": "C.UTF-8",
+        }
+
+    def tearDown(self):
+        for p in self.children:
+            p.kill()
+            p.wait()
+            if p.stdout:
+                p.stdout.close()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    # -- helpers
+
+    def run_tool(self, *args, code=0, input=None, env=None):
+        p = subprocess.run([PYTHON, TOOL, *args], capture_output=True, text=True, input=input,
+                           env={**self.env, **(env or {})}, timeout=60)
+        if code is not None:
+            self.assertEqual(p.returncode, code, f"{args}\nstdout: {p.stdout}\nstderr: {p.stderr}")
+        return p
+
+    def write(self, path: str, doc: dict):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            json.dump(doc, f)
+        os.chmod(path, 0o600)
+
+    def read(self, path: str) -> dict:
+        with open(path) as f:
+            return json.load(f)
+
+    def text(self, path: str) -> str:
+        with open(path) as f:
+            return f.read()
+
+    def set_live(self, doc: dict):
+        self.write(os.path.join(self.codex_home, "auth.json"), doc)
+
+    def live(self) -> dict:
+        return self.read(os.path.join(self.codex_home, "auth.json"))
+
+    def acct(self, name: str) -> str:
+        return os.path.join(self.store, "accounts", f"{name}.json")
+
+    def save(self, name: str, doc: dict):
+        self.write(self.acct(name), doc)
+        os.chmod(os.path.join(self.store, "accounts"), 0o700)
+        os.chmod(self.store, 0o700)
+
+    def codex_calls(self) -> list:
+        try:
+            with open(self.log) as f:
+                return [json.loads(line) for line in f]
+        except OSError:
+            return []
+
+    def fake_running_codex(self, home: str | None = None) -> int:
+        """A process that looks like `codex` (argv[0] ends in /codex) on this Codex home."""
+        d = os.path.join(self.tmp, "procs", str(len(self.children)))
+        os.makedirs(d)
+        os.symlink(shutil.which("sleep"), os.path.join(d, "codex"))
+        p = subprocess.Popen([os.path.join(d, "codex"), "60"], env={"CODEX_HOME": home or self.codex_home})
+        self.children.append(p)
+        time.sleep(0.1)
+        return p.pid
+
+
+class Identity(unittest.TestCase):
+    """The parts that need no files: reading who a login is."""
+
+    @classmethod
+    def setUpClass(cls):
+        spec = importlib.util.spec_from_file_location("codexhop_mod", TOOL)
+        cls.m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.m)
+
+    def test_claims_name_the_login(self):
+        ident = self.m.identity(login(**A))
+        self.assertEqual(ident["email"], "ann@example.com")
+        self.assertEqual(ident["plan"], "plus")
+        self.assertEqual(ident["key"], "chatgpt:user-a:ws-a")
+        self.assertFalse(self.m.mixed(ident))
+
+    def test_same_person_other_workspace_is_another_login(self):
+        a1 = self.m.identity(login(**A))
+        a2 = self.m.identity(login(**{**A, "account": "ws-z"}))
+        self.assertNotEqual(a1["key"], a2["key"])
+
+    def test_account_field_is_not_trusted(self):
+        doc = login(**{**A, "field": "ws-b"})
+        ident = self.m.identity(doc)
+        self.assertTrue(self.m.mixed(ident))
+        self.assertEqual(ident["key"], "chatgpt:user-a:ws-a")
+        self.assertEqual(self.m.normalised(doc)["tokens"]["account_id"], "ws-a")
+
+    def test_api_key_login(self):
+        ident = self.m.identity({"auth_mode": "apikey", "OPENAI_API_KEY": "sk-test-1234"})
+        self.assertEqual(ident["kind"], "apikey")
+        self.assertTrue(ident["key"].startswith("apikey:"))
+        self.assertNotIn("sk-test", json.dumps(ident))
+
+    def test_newer_copy_by_issue_time(self):
+        old, new = login(**A, iat=time.time() - 9000), login(**A)
+        self.assertTrue(self.m.newer(new, old))
+        self.assertFalse(self.m.newer(old, new))
+
+    def test_codex_process_detection(self):
+        self.assertTrue(self.m.is_codex(["/home/u/.local/bin/codex", "resume"]))
+        self.assertTrue(self.m.is_codex(["node", "/usr/lib/node_modules/@openai/codex/bin/codex.js"]))
+        self.assertTrue(self.m.is_codex(["/usr/bin/node", "/usr/bin/codex"]))
+        self.assertFalse(self.m.is_codex(["node", "-e", "require('/home/u/.codex/plugins/x')"]))
+        self.assertFalse(self.m.is_codex(["python3", "/usr/bin/codexhop"]))
+
+    def test_usage_windows_go_by_length(self):
+        body = usage_body(short=42, long=7)
+        got = self.m.parse_usage(body, time.time())
+        self.assertEqual(got["short"]["pct"], 42.0)
+        self.assertEqual(got["long"]["pct"], 7.0)
+        weekly_only = {"rate_limit": {"primary_window": {"used_percent": 5, "limit_window_seconds": 604800,
+                                                         "reset_at": int(time.time()) + 99}}}
+        got = self.m.parse_usage(weekly_only, time.time())
+        self.assertIsNone(got["short"])
+        self.assertEqual(got["long"]["pct"], 5.0)
+
+    def test_window_past_its_reset_is_empty(self):
+        win = {"pct": 80.0, "seconds": 18000, "resetsAt": time.time() - 5}
+        now = self.m.window_now(win)
+        self.assertEqual(now["pct"], 0.0)
+        self.assertEqual(now["was"], 80.0)
+
+    def test_config_value(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False) as f:
+            f.write('model = "x"\ncli_auth_credentials_store = "keyring" # here\n[profiles.p]\n'
+                    'cli_auth_credentials_store = "file"\n')
+        try:
+            self.assertEqual(self.m.config_value("cli_auth_credentials_store", f.name), "keyring")
+            self.assertIsNone(self.m.config_value("chatgpt_base_url", f.name))
+        finally:
+            os.remove(f.name)
+
+
+class SaveListWhoami(Base):
+    def test_save_names_the_login_after_its_email(self):
+        self.set_live(login(**A))
+        p = self.run_tool("save")
+        self.assertIn("saved ann", p.stdout)
+        self.assertEqual(self.read(self.acct("ann")), self.live())
+        self.assertEqual(stat.S_IMODE(os.stat(self.acct("ann")).st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE(os.stat(self.store).st_mode), 0o700)
+
+    def test_save_refuses_a_second_name_for_one_login(self):
+        self.set_live(login(**A))
+        self.run_tool("save", "work")
+        p = self.run_tool("save", "other", code=1)
+        self.assertIn("already saved as 'work'", p.stderr)
+
+    def test_list_and_whoami_need_no_network(self):
+        self.set_live(login(**A))
+        self.save("ann", self.live())
+        self.save("bob", login(**B))
+        p = self.run_tool("list", env={"CODEXHOP_OFFLINE": "1"})
+        lines = p.stdout.splitlines()
+        self.assertTrue(any(ln.startswith("*") and "ann" in ln and "ann@example.com" in ln for ln in lines))
+        self.assertTrue(any("bob@example.com" in ln and "pro" in ln for ln in lines))
+        p = self.run_tool("whoami")
+        self.assertIn("ann@example.com", p.stdout)
+        self.assertIn("saved as: ann", p.stdout)
+        self.assertEqual(self.run_tool("active").stdout.strip(), "ann")
+        self.assertEqual(self.server.calls, [])
+
+    def test_json_never_carries_a_token(self):
+        live = login(**A)
+        self.set_live(live)
+        self.save("ann", live)
+        bob = login(**B)
+        self.save("bob", bob)
+        out = ""
+        for args in (("list", "--json"), ("whoami", "--json"), ("doctor", "--json"), ("active", "--json")):
+            out += self.run_tool(*args, code=None).stdout
+        json.loads(self.run_tool("list", "--json").stdout)
+        for secret in secrets_in(live) + secrets_in(bob):
+            self.assertNotIn(secret, out)
+        self.assertIn("ann@example.com", out)
+
+    def test_one_email_in_two_workspaces_shows_the_workspace(self):
+        self.save("home", login(**A))
+        self.save("team", login(**{**A, "account": "ws-team-1234"}))
+        p = self.run_tool("list")
+        self.assertIn("WORKSPACE", p.stdout)
+        self.assertIn("ws-team-", p.stdout)
+
+    def test_bare_command_without_a_terminal_lists(self):
+        self.save("ann", login(**A))
+        self.save("bob", login(**B))
+        p = self.run_tool()
+        self.assertIn("NAME", p.stdout)
+        self.assertIn("bob", p.stdout)
+
+
+class Hop(Base):
+    def test_hop_swaps_the_login_and_files_the_old_one(self):
+        old_a = login(**A, iat=time.time() - 7200)
+        self.save("ann", old_a)
+        renewed_a = login(**A)  # Codex renewed the live copy since the last save
+        self.set_live(renewed_a)
+        bob = login(**B)
+        self.save("bob", bob)
+        p = self.run_tool("bob")
+        self.assertIn("switched to bob", p.stdout)
+        self.assertEqual(self.live(), bob)
+        self.assertEqual(self.read(self.acct("ann")), renewed_a)
+        self.assertEqual(self.text(os.path.join(self.store, "active")).strip(), "bob")
+        self.assertEqual(stat.S_IMODE(os.stat(os.path.join(self.codex_home, "auth.json")).st_mode), 0o600)
+
+    def test_an_older_live_copy_never_overwrites_a_newer_saved_one(self):
+        newer_a = login(**A)
+        self.save("ann", newer_a)
+        self.set_live(login(**A, iat=time.time() - 7200))
+        self.save("bob", login(**B))
+        self.run_tool("use", "bob")
+        self.assertEqual(self.read(self.acct("ann")), newer_a)
+
+    def test_an_unknown_live_login_is_stashed_not_dropped(self):
+        cat = login(**C)
+        self.set_live(cat)
+        self.save("bob", login(**B))
+        p = self.run_tool("bob")
+        self.assertIn("as 'cat'", p.stderr)
+        self.assertEqual(self.read(self.acct("cat")), cat)
+
+    def test_a_mixed_file_is_filed_by_its_tokens(self):
+        # What Codex before 0.164 could leave: ann's renewed tokens under bob's account_id.
+        mixed = login(**{**A, "field": "ws-b"})
+        self.set_live(mixed)
+        self.save("ann", login(**A, iat=time.time() - 7200))
+        bob = login(**B)
+        self.save("bob", bob)
+        self.run_tool("bob")
+        filed = self.read(self.acct("ann"))
+        self.assertEqual(filed["tokens"]["access_token"], mixed["tokens"]["access_token"])
+        self.assertEqual(filed["tokens"]["account_id"], "ws-a")
+        self.assertEqual(self.read(self.acct("bob")), bob)
+
+    def test_already_on_it(self):
+        self.set_live(login(**A))
+        self.save("ann", self.live())
+        p = self.run_tool("ann")
+        self.assertIn("already on ann", p.stdout)
+
+    def test_an_expired_target_is_renewed_first_and_saved_before_the_hop(self):
+        self.set_live(login(**A))
+        self.save("ann", self.live())
+        stale = login(**B, iat=time.time() - 300 * 3600)
+        self.save("bob", stale)
+        fresh = login(**B)
+        self.server.refresh[stale["tokens"]["refresh_token"]] = fresh
+        self.run_tool("bob")
+        saved = self.read(self.acct("bob"))
+        self.assertEqual(saved["tokens"]["refresh_token"], fresh["tokens"]["refresh_token"])
+        self.assertEqual(self.live()["tokens"]["access_token"], fresh["tokens"]["access_token"])
+        call = self.server.calls[0]
+        self.assertEqual(call[3]["grant_type"], "refresh_token")
+        self.assertEqual(call[3]["client_id"], "app_EMoamEEZ73f0CkXaXp7hrann")
+
+    def test_a_target_open_in_a_run_session_needs_yes(self):
+        self.set_live(login(**A))
+        self.save("ann", self.live())
+        self.save("bob", login(**B))
+        pid = self.fake_running_codex(os.path.join(self.store, "run", "bob"))
+        pids = os.path.join(self.store, "run", "bob", ".codexhop-pids")
+        os.makedirs(pids)
+        open(os.path.join(pids, str(pid)), "w").close()
+        p = self.run_tool("bob", code=1)
+        self.assertIn("open in a `codexhop run` session", p.stderr)
+        self.run_tool("bob", "--yes")
+
+    def test_open_sessions_are_told_what_happens(self):
+        self.set_live(login(**A))
+        self.save("ann", self.live())
+        self.save("bob", login(**B))
+        self.fake_running_codex()
+        p = self.run_tool("bob")
+        self.assertIn("codex session(s) open", p.stderr)
+        self.assertIn("'ann'", p.stderr)
+
+    def test_no_hop_while_an_open_session_is_about_to_renew(self):
+        due = login(**A, life=200)  # inside Codex's 5-minute renewal window
+        self.set_live(due)
+        self.save("ann", due)
+        self.save("bob", login(**B))
+        self.fake_running_codex()
+        p = self.run_tool("bob", code=1)
+        self.assertIn("due for renewal", p.stderr)
+        self.assertEqual(self.live(), due)
+        self.run_tool("bob", "--yes")
+        self.assertEqual(self.live()["tokens"]["account_id"], "ws-b")
+
+    def test_an_old_renewal_with_time_left_does_not_stop_a_hop(self):
+        live = login(**A, iat=time.time() - 8.5 * 86400)  # 36 hours of access token left
+        self.set_live(live)
+        self.save("ann", live)
+        self.save("bob", login(**B))
+        self.fake_running_codex()
+        p = self.run_tool("bob")
+        self.assertIn("in about 1d", p.stderr)
+
+    def test_the_note_says_when_open_sessions_stop(self):
+        self.set_live(login(**A))
+        self.save("ann", self.live())
+        self.save("bob", login(**B))
+        self.save("zoe", login(email="zoe@example.com", user="user-z", account="ws-a"))
+        self.fake_running_codex()
+        p = self.run_tool("bob")
+        self.assertIn("in about 9d", p.stderr)
+        self.assertIn("signed in to another account", p.stderr)
+        self.run_tool("ann")
+        p = self.run_tool("zoe")
+        self.assertIn("same workspace", p.stderr)
+
+    def test_old_codex_with_open_sessions_gets_a_note(self):
+        self.set_live(login(**A))
+        self.save("ann", self.live())
+        self.save("bob", login(**B))
+        self.fake_running_codex()
+        p = self.run_tool("bob", env={"FAKE_CODEX_VERSION": "0.160.1"})
+        self.assertIn("Codex 0.160.1", p.stderr)
+
+    def test_hop_waits_for_codex_auth_lock_then_gives_up(self):
+        self.set_live(login(**A))
+        self.save("ann", self.live())
+        self.save("bob", login(**B))
+        holder = subprocess.Popen([sys.executable, "-c", textwrap.dedent(f"""
+            import fcntl, os, time
+            fd = os.open({os.path.join(self.codex_home, 'auth.lock')!r}, os.O_CREAT | os.O_RDWR)
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            print("held", flush=True)
+            time.sleep(30)
+        """)], stdout=subprocess.PIPE, text=True)
+        self.children.append(holder)
+        self.assertEqual(holder.stdout.readline().strip(), "held")
+        before = self.live()
+        p = self.run_tool("bob", code=1)
+        self.assertIn("Codex is writing its login right now", p.stderr)
+        self.assertEqual(self.live(), before)
+
+    def test_keyring_store_is_refused_with_the_way_out(self):
+        with open(os.path.join(self.codex_home, "config.toml"), "w") as f:
+            f.write('cli_auth_credentials_store = "keyring"\n')
+        self.set_live(login(**A))
+        self.save("bob", login(**B))
+        p = self.run_tool("bob", code=1)
+        self.assertIn('cli_auth_credentials_store = "file"', p.stderr)
+
+    def test_api_key_login_hops_like_any_other(self):
+        self.set_live(login(**A))
+        self.save("ann", self.live())
+        key = {"auth_mode": "apikey", "OPENAI_API_KEY": "sk-proj-abcd1234"}
+        self.save("key", key)
+        self.run_tool("key")
+        self.assertEqual(self.live(), key)
+        self.run_tool("ann")
+        self.assertEqual(self.live()["auth_mode"], "chatgpt")
+
+
+class Renew(Base):
+    def test_only_due_logins_are_renewed(self):
+        self.set_live(login(**A))
+        self.save("ann", self.live())
+        due = login(**B, iat=time.time() - 9.5 * 86400)  # access token runs out in half a day
+        self.save("bob", due)
+        self.save("cat", login(**C))
+        fresh = login(**B)
+        self.server.refresh[due["tokens"]["refresh_token"]] = fresh
+        p = self.run_tool("renew")
+        self.assertIn("bob  access", p.stdout)
+        self.assertIn("cat  not due", p.stdout)
+        saved = self.read(self.acct("bob"))
+        self.assertEqual(saved["tokens"]["refresh_token"], fresh["tokens"]["refresh_token"])
+        self.assertEqual(len([c for c in self.server.calls if c[0] == "POST"]), 1)
+
+    def test_a_retired_refresh_token_says_to_sign_in_again(self):
+        due = login(**B, iat=time.time() - 9.5 * 86400)
+        self.save("bob", due)
+        self.server.refresh[due["tokens"]["refresh_token"]] = (
+            401, {"error": {"code": "refresh_token_reused", "message": "used"}})
+        p = self.run_tool("renew", "bob", code=1)
+        self.assertIn("already renewed somewhere else", p.stdout)
+        self.assertIn("codexhop add", p.stdout)
+        self.assertEqual(self.read(self.acct("bob")), due)
+
+    def test_the_live_login_is_left_to_an_open_codex(self):
+        live = login(**A, iat=time.time() - 9.5 * 86400)
+        self.set_live(live)
+        self.save("ann", live)
+        self.fake_running_codex()
+        p = self.run_tool("renew")
+        self.assertIn("skipped - the live login", p.stdout)
+        self.assertEqual([c for c in self.server.calls if c[0] == "POST"], [])
+
+    def test_renewing_the_live_login_writes_both_copies(self):
+        live = login(**A, iat=time.time() - 9.5 * 86400)
+        self.set_live(live)
+        self.save("ann", live)
+        fresh = login(**A)
+        self.server.refresh[live["tokens"]["refresh_token"]] = fresh
+        self.run_tool("renew", "ann")
+        self.assertEqual(self.live()["tokens"]["refresh_token"], fresh["tokens"]["refresh_token"])
+        saved = self.read(self.acct("ann"))
+        self.assertEqual(saved["tokens"]["refresh_token"], fresh["tokens"]["refresh_token"])
+
+
+class Usage(Base):
+    def test_usage_table_and_cache_without_tokens(self):
+        a, b = login(**A), login(**B)
+        self.set_live(a)
+        self.save("ann", a)
+        self.save("bob", b)
+        self.server.usage[a["tokens"]["access_token"]] = (200, usage_body(12, 30))
+        self.server.usage[b["tokens"]["access_token"]] = (200, usage_body(80, 50, plan="pro"))
+        p = self.run_tool("usage")
+        self.assertRegex(p.stdout, r"ann\s+12%\s+resets")
+        self.assertRegex(p.stdout, r"bob\s+80%")
+        gets = [c for c in self.server.calls if c[0] == "GET"]
+        self.assertEqual({c[2].get("chatgpt-account-id") for c in gets}, {"ws-a", "ws-b"})
+        cache = self.text(os.path.join(self.store, "usage.json"))
+        for secret in secrets_in(a) + secrets_in(b):
+            self.assertNotIn(secret, cache)
+        self.server.calls.clear()
+        self.run_tool("usage")  # under a minute old: answered from the cache
+        self.assertEqual(self.server.calls, [])
+
+    def test_retry_after_is_honoured(self):
+        a = login(**A)
+        self.save("ann", a)
+        self.server.usage[a["tokens"]["access_token"]] = (429, {}, {"Retry-After": "900"})
+        p = self.run_tool("usage", "--fresh")
+        self.assertIn("throttled", p.stdout)
+        self.server.calls.clear()
+        p = self.run_tool("usage", "--fresh")
+        self.assertIn("throttled", p.stdout)
+        self.assertEqual(self.server.calls, [])
+
+    def test_an_idle_expired_login_is_renewed_to_read_it(self):
+        stale = login(**B, iat=time.time() - 300 * 3600)
+        self.save("bob", stale)
+        fresh = login(**B)
+        self.server.refresh[stale["tokens"]["refresh_token"]] = fresh
+        self.server.usage[fresh["tokens"]["access_token"]] = (200, usage_body(5, 6))
+        p = self.run_tool("usage")
+        self.assertRegex(p.stdout, r"bob\s+5%")
+        saved = self.read(self.acct("bob"))
+        self.assertEqual(saved["tokens"]["refresh_token"], fresh["tokens"]["refresh_token"])
+
+    def test_the_live_login_is_not_renewed_under_an_open_codex(self):
+        stale = login(**A, iat=time.time() - 300 * 3600)
+        self.set_live(stale)
+        self.save("ann", stale)
+        self.fake_running_codex()
+        p = self.run_tool("usage")
+        self.assertIn("open codex session renews it", p.stdout)
+        self.assertEqual([c for c in self.server.calls if c[0] == "POST"], [])
+
+
+class Next(Base):
+    def test_next_needs_its_list_once_then_picks_the_most_room(self):
+        a, b, c = login(**A), login(**B), login(**C)
+        self.set_live(a)
+        for n, d in (("ann", a), ("bob", b), ("cat", c)):
+            self.save(n, d)
+        self.server.usage[b["tokens"]["access_token"]] = (200, usage_body(70, 10))
+        self.server.usage[c["tokens"]["access_token"]] = (200, usage_body(20, 10))
+        p = self.run_tool("next", code=2)
+        self.assertIn("which logins it may choose from", p.stderr)
+        self.run_tool("next", "ann", "bob", "cat")
+        self.assertEqual(self.live(), c)
+        self.assertEqual(self.text(os.path.join(self.store, "next")).split(), ["ann", "bob", "cat"])
+
+    def test_next_stops_when_nobody_has_room(self):
+        a, b = login(**A), login(**B)
+        self.set_live(a)
+        self.save("ann", a)
+        self.save("bob", b)
+        self.server.usage[b["tokens"]["access_token"]] = (200, usage_body(99, 10))
+        p = self.run_tool("next", "ann", "bob", code=1)
+        self.assertIn("no login in the list has room", p.stderr)
+        self.assertEqual(self.live(), a)
+
+
+class Add(Base):
+    def test_add_signs_in_aside_and_leaves_the_live_login(self):
+        live = login(**A)
+        self.set_live(live)
+        self.save("ann", live)
+        new = os.path.join(self.tmp, "new.json")
+        self.write(new, login(**B))
+        p = self.run_tool("add", "bob", "--device-auth", env={"FAKE_CODEX_LOGIN": new})
+        self.assertIn("saved bob", p.stdout)
+        self.assertEqual(self.live(), live)
+        self.assertEqual(self.read(self.acct("bob")), self.read(new))
+        call = [c for c in self.codex_calls() if c["argv"][:1] == ["login"]][0]
+        self.assertEqual(call["argv"], ["login", "--device-auth"])
+        self.assertNotEqual(call["home"], self.codex_home)
+        self.assertFalse(os.path.exists(call["home"]))  # the temporary home is gone
+
+    def test_add_with_no_login_makes_it_live(self):
+        new = os.path.join(self.tmp, "new.json")
+        self.write(new, login(**B))
+        p = self.run_tool("add", "bob", env={"FAKE_CODEX_LOGIN": new})
+        self.assertIn("now live", p.stdout)
+        self.assertEqual(self.live(), self.read(new))
+
+    def test_add_refuses_a_login_already_saved_elsewhere(self):
+        self.save("ann", login(**A))
+        new = os.path.join(self.tmp, "new.json")
+        self.write(new, login(**A))
+        p = self.run_tool("add", "work", env={"FAKE_CODEX_LOGIN": new}, code=1)
+        self.assertIn("which is saved as 'ann'", p.stderr)
+        self.assertFalse(os.path.exists(self.acct("work")))
+
+    def test_add_that_signs_in_to_nothing_saves_nothing(self):
+        p = self.run_tool("add", "bob", code=1)
+        self.assertIn("Nothing saved", p.stderr)
+
+    def test_a_command_name_is_not_an_account_name(self):
+        p = self.run_tool("add", "list", code=1)
+        self.assertIn("is a codexhop command", p.stderr)
+
+
+class Run(Base):
+    def setUp(self):
+        super().setUp()
+        for name, text in (("config.toml", 'model = "x"\n'), ("AGENTS.md", "hello\n"),
+                           ("models_cache.json", "{}"), ("history.jsonl", "")):
+            with open(os.path.join(self.codex_home, name), "w") as f:
+                f.write(text)
+        for d in ("sessions", "app-server-daemon", "skills"):
+            os.makedirs(os.path.join(self.codex_home, d))
+        open(os.path.join(self.codex_home, "auth.lock"), "w").close()
+        self.set_live(login(**A))
+        self.save("ann", self.live())
+        self.bob = login(**B)
+        self.save("bob", self.bob)
+
+    def test_run_gives_the_session_a_home_of_its_own(self):
+        self.run_tool("run", "bob", "--model", "x")
+        call = self.codex_calls()[-1]
+        home = os.path.join(self.store, "run", "bob")
+        self.assertEqual(call["home"], home)
+        self.assertEqual(call["argv"], ["--model", "x"])
+        self.assertEqual(self.read(os.path.join(home, "auth.json")), self.bob)
+        for linked in ("config.toml", "AGENTS.md", "sessions", "skills", "history.jsonl"):
+            self.assertTrue(os.path.islink(os.path.join(home, linked)), linked)
+        for kept_out in ("models_cache.json", "app-server-daemon", "codexhop"):
+            self.assertFalse(os.path.lexists(os.path.join(home, kept_out)), kept_out)
+        self.assertFalse(os.path.islink(os.path.join(home, "auth.lock")))
+        self.assertEqual(self.live()["tokens"]["account_id"], "ws-a")  # the live login is untouched
+
+    def test_the_live_account_runs_plain_codex(self):
+        self.run_tool("run", "ann")
+        self.assertEqual(self.codex_calls()[-1]["home"], self.codex_home)
+
+    def test_a_renewal_inside_the_session_is_saved_back(self):
+        renewed = os.path.join(self.tmp, "renewed.json")
+        self.write(renewed, login(**B, iat=time.time()))
+        self.run_tool("run", "bob", env={"FAKE_CODEX_ROTATE": renewed})
+        self.assertEqual(self.read(self.acct("bob")), self.read(renewed))
+
+    def test_signing_in_as_someone_else_inside_is_filed_apart(self):
+        other = os.path.join(self.tmp, "other.json")
+        self.write(other, login(**C))
+        p = self.run_tool("run", "bob", env={"FAKE_CODEX_ROTATE": other})
+        self.assertIn("'bob' is unchanged", p.stderr)
+        self.assertEqual(self.read(self.acct("bob")), self.bob)
+        self.assertEqual(self.read(self.acct("cat")), self.read(other))
+
+    def test_exit_code_passes_through(self):
+        self.run_tool("run", "bob", env={"FAKE_CODEX_EXIT": "3"}, code=3)
+
+    def test_codexhop_inside_a_run_session_acts_on_the_real_setup(self):
+        self.run_tool("run", "bob")
+        inside = os.path.join(self.store, "run", "bob")
+        p = self.run_tool("active", env={"CODEX_HOME": inside})
+        self.assertEqual(p.stdout.strip(), "ann")
+
+
+class Doctor(Base):
+    def test_clean_setup(self):
+        self.set_live(login(**A))
+        self.save("ann", self.live())
+        p = self.run_tool("doctor")
+        self.assertIn("no problems found", p.stdout)
+        self.assertIn("0.166.0", p.stdout)
+
+    def test_repairs(self):
+        mixed = login(**{**A, "field": "ws-b"})
+        self.set_live(mixed)
+        self.save("ann", login(**A, iat=time.time() - 7200))
+        bob = login(**B)
+        self.save("bob", bob)
+        with open(os.path.join(self.store, "active"), "w") as f:
+            f.write("bob\n")
+        os.chmod(self.acct("bob"), 0o644)
+        os.makedirs(os.path.join(self.store, "run", "gone"))
+        p = self.run_tool("doctor", code=1)
+        self.assertIn("under the account_id of workspace ws-b", p.stdout)
+        self.assertIn("mode 644", p.stdout)
+        self.run_tool("doctor", "--fix")
+        self.assertEqual(self.live(), bob)
+        filed = self.read(self.acct("ann"))
+        self.assertEqual(filed["tokens"]["access_token"], mixed["tokens"]["access_token"])
+        self.assertEqual(stat.S_IMODE(os.stat(self.acct("bob")).st_mode), 0o600)
+        self.assertFalse(os.path.exists(os.path.join(self.store, "run", "gone")))
+        self.assertIn("no problems found", self.run_tool("doctor").stdout)
+
+    def test_duplicates_old_codex_and_keyring(self):
+        self.save("one", login(**A))
+        self.save("two", login(**A))
+        with open(os.path.join(self.codex_home, "config.toml"), "w") as f:
+            f.write('cli_auth_credentials_store = "auto"\n')
+        p = self.run_tool("doctor", code=1, env={"FAKE_CODEX_VERSION": "0.160.1"})
+        self.assertIn("are the same login", p.stdout)
+        self.assertIn("Codex 0.160.1 does not check", p.stdout)
+        self.assertIn("'auto' store", p.stdout)
+
+
+class Housekeeping(Base):
+    def test_rm_and_rename(self):
+        self.set_live(login(**A))
+        self.save("ann", self.live())
+        self.save("bob", login(**B))
+        self.run_tool("run", "bob")
+        self.run_tool("next", "ann", "bob", code=None)
+        self.run_tool("rename", "bob", "robert")
+        self.assertTrue(os.path.exists(self.acct("robert")))
+        self.assertTrue(os.path.isdir(os.path.join(self.store, "run", "robert")))
+        self.assertIn("robert", self.text(os.path.join(self.store, "next")))
+        self.run_tool("rm", "robert", "-y")
+        self.assertFalse(os.path.exists(self.acct("robert")))
+        self.assertFalse(os.path.exists(os.path.join(self.store, "run", "robert")))
+
+    def test_shell_init(self):
+        p = self.run_tool("shell-init")
+        self.assertIn("alias chop='codexhop'", p.stdout)
+        self.assertIn("complete -F _codexhop_complete codexhop chop", p.stdout)
+        p = self.run_tool("shell-init", "--alias", "cx")
+        self.assertIn("alias cx='codexhop'", p.stdout)
+        check = subprocess.run(["bash", "-n"], input=p.stdout, capture_output=True, text=True)
+        self.assertEqual(check.returncode, 0, check.stderr)
+
+    def test_unknown_things(self):
+        self.assertIn("unknown command", self.run_tool("frobnicate", code=2).stderr)
+        self.assertIn("unknown option", self.run_tool("list", "--bogus", code=2).stderr)
+        self.assertIn("no saved account called 'nope'", self.run_tool("use", "nope", code=1).stderr)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1,0 +1,61 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "codexhop"
+dynamic = ["version"]
+description = "Use several ChatGPT accounts with OpenAI Codex on one machine: hop the saved login in one command, or run a different account in each terminal. One file, no dependencies."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Ebenworks", email = "contact@ebenworks.co" }]
+requires-python = ">=3.9"
+dependencies = []
+keywords = [
+    "codex", "openai-codex", "codex-cli", "chatgpt", "account-switcher", "multi-account",
+    "chatgpt-plus", "chatgpt-pro", "chatgpt-business", "oauth", "credentials",
+    "cli", "developer-tools", "productivity", "shell", "terminal", "ai", "llm",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: MacOS :: MacOS X",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: System :: Systems Administration :: Authentication/Directory",
+    "Topic :: Terminals",
+    "Topic :: Utilities",
+]
+
+[project.urls]
+Homepage = "https://github.com/psychofict/codexhop"
+Repository = "https://github.com/psychofict/codexhop"
+Documentation = "https://github.com/psychofict/codexhop#readme"
+Changelog = "https://github.com/psychofict/codexhop/blob/main/CHANGELOG.md"
+"Security policy" = "https://github.com/psychofict/codexhop/blob/main/SECURITY.md"
+Issues = "https://github.com/psychofict/codexhop/issues"
+Author = "https://ebenworks.co/"
+
+[project.scripts]
+codexhop = "codexhop:console_main"
+
+[tool.setuptools]
+py-modules = ["codexhop"]
+
+[tool.setuptools.dynamic]
+version = { attr = "codexhop.VERSION" }
+
+[tool.ruff]
+line-length = 110
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "UP"]
