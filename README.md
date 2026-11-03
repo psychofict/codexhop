@@ -34,12 +34,13 @@ the last reading `chop usage` saved, so the menu comes up at once.
 ## Install
 
 ```bash
-pipx install git+https://github.com/psychofict/codexhop
-eval "$(codexhop shell-init)"       # the `chop` alias and tab completion
+pipx install codexhop              # or: pip install --user codexhop
+eval "$(codexhop shell-init)"      # the `chop` alias and tab completion
 ```
 
 Put the `eval` line in your `~/.bashrc` or `~/.zshrc` and open a new terminal.
-It needs Python 3.9 or newer and Codex, on Linux or macOS.
+It needs Python 3.9 or newer and Codex, on Linux or macOS. For the newest code
+from GitHub instead, use `pipx install git+https://github.com/psychofict/codexhop`.
 
 To install from a clone instead, run `./install.sh`. It links
 `~/.local/bin/codexhop` to the clone and adds the same line to your shell rc. If

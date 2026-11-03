@@ -42,13 +42,12 @@ What the tool does about that:
 
 ## How releases are made
 
-codexhop is installed from this repository; it is not on PyPI yet. When it is
-published there, releases will be built by GitHub Actions and uploaded through
-PyPI's trusted publishing.
-
-PyPI will then check that each upload comes from this repository's release
+Releases are built by GitHub Actions and uploaded to PyPI through trusted
+publishing. PyPI checks that each upload comes from this repository's release
 workflow and its `pypi` environment, so no PyPI token is stored anywhere to
 steal.
+
+Each publish also waits for the maintainer's approval in that environment.
 
 ## Known limits
 
