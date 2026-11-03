@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img"
+     aria-label="codexhop mark: a switch whose knob is a terminal prompt, hopping to the right">
+  <title>codexhop</title>
+  <!-- Night #150f23, deep violet #1f1633, hairline #362d59, violet #6a5fc1, lime #c2ef4e, pink #fa7faa.
+       The mark is a switch: the knob is the prompt (>_) of the account you are on, and the two
+       rings behind it are the accounts it hopped past. -->
+  <rect width="512" height="512" rx="112" fill="#150f23"/>
+  <rect x="40" y="148" width="432" height="216" rx="108" fill="#1f1633" stroke="#362d59" stroke-width="6"/>
+  <circle cx="152" cy="256" r="72" fill="none" stroke="#6a5fc1" stroke-width="8" opacity="0.45"/>
+  <circle cx="240" cy="256" r="72" fill="none" stroke="#fa7faa" stroke-width="8" opacity="0.8"/>
+  <circle cx="362" cy="256" r="86" fill="#c2ef4e"/>
+  <g fill="none" stroke="#150f23" stroke-width="18" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M322 218 L358 256 L322 294"/>
+    <path d="M372 296 L406 296"/>
+  </g>
+</svg>

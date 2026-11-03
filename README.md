@@ -1,12 +1,13 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/psychofict/codexhop/main/assets/cover.png" alt="codexhop: hop OpenAI Codex between ChatGPT accounts" width="820">
+  <img src="https://raw.githubusercontent.com/psychofict/codexhop/main/assets/cover.png" alt="codexhop: switch OpenAI Codex between your ChatGPT accounts" width="820">
 </p>
 
 <p align="center">
+  <a href="https://pypi.org/project/codexhop/"><img src="https://img.shields.io/pypi/v/codexhop?color=6a5fc1" alt="PyPI version"></a>
   <a href="https://github.com/psychofict/codexhop/actions/workflows/ci.yml"><img src="https://github.com/psychofict/codexhop/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="https://github.com/psychofict/codexhop/blob/main/LICENSE"><img src="https://img.shields.io/badge/licence-MIT-FC5F00" alt="MIT licence"></a>
-  <img src="https://img.shields.io/badge/python-3.9%2B-FC5F00" alt="Python 3.9 or newer">
-  <img src="https://img.shields.io/badge/dependencies-none-FC5F00" alt="No dependencies">
+  <a href="https://github.com/psychofict/codexhop/blob/main/LICENSE"><img src="https://img.shields.io/badge/licence-MIT-6a5fc1" alt="MIT licence"></a>
+  <img src="https://img.shields.io/badge/python-3.9%2B-6a5fc1" alt="Python 3.9 or newer">
+  <img src="https://img.shields.io/badge/dependencies-none-6a5fc1" alt="No dependencies">
 </p>
 
 codexhop lets you use several ChatGPT accounts with OpenAI Codex on one machine,
