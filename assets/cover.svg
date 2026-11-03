@@ -36,11 +36,11 @@
         letter-spacing="-4" fill="#150f23">codexhop</text>
   <rect x="1072" y="140" width="44" height="94" rx="6" fill="#6a5fc1"/>
 
-  <text x="462" y="300" font-family="Rubik, system-ui, sans-serif" font-size="30" font-weight="400"
-        fill="#79628c">Switch OpenAI Codex between your ChatGPT accounts.</text>
+  <text x="462" y="304" font-family="Rubik, system-ui, sans-serif" font-size="38" font-weight="400"
+        fill="#79628c">Switch Codex between your ChatGPT accounts.</text>
 
   <!-- The command it takes. -->
-  <rect x="462" y="338" width="246" height="58" rx="29" fill="#f0f0f0" stroke="#cfcfdb" stroke-width="2"/>
-  <text x="490" y="376" font-family="'JetBrains Mono', Monaco, monospace" font-size="26" font-weight="500"
+  <rect x="462" y="342" width="292" height="68" rx="34" fill="#f0f0f0" stroke="#cfcfdb" stroke-width="2"/>
+  <text x="492" y="387" font-family="'JetBrains Mono', Monaco, monospace" font-size="32" font-weight="500"
         fill="#6a5fc1">$ <tspan fill="#1f1633">chop work</tspan></text>
 </svg>

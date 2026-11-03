@@ -62,13 +62,6 @@ use `chop add work --device-auth`.
 
 ## Commands
 
-```bash
-chop work               # new codex sessions start as work
-chop run home           # codex as home in this terminal only; arguments after the name go to codex
-chop usage              # 5-hour and weekly usage for every account
-chop next home work     # hop to whichever of the others has room in its 5-hour window
-```
-
 | Command | What it does |
 |---|---|
 | `chop` | list the accounts and ask which one to hop to |
