@@ -107,6 +107,15 @@ is not asked again until the pause is over.
 An idle account whose access token has run out is renewed first, so every
 account can be read, not only the live one.
 
+### In your menu bar, tray and dashboard
+
+[codexwatch](https://github.com/psychofict/codexwatch), a Codex usage tracker
+from the same maker, picks up codexhop when it finds it. Its dashboard, tray and
+status-bar output show every account's last reading and the one with the most
+room, its quota report names the account behind each plan window, and
+`codexwatch limits --refresh` runs `codexhop usage` for you. codexhop does not
+need it, and codexwatch opens no login file.
+
 ## What happens to sessions that are already open
 
 A hop changes the login new `codex` sessions start with. A session that is
@@ -171,7 +180,9 @@ lists what the tool holds and how it protects it.
 other account.
 
 **Does it switch accounts by itself when one runs out?** No. `chop next` hops
-to another login with room in its 5-hour window, but only when you run it.
+to another login with room in its 5-hour window, but only when you run it. If
+you want it automatic, [codexwatch](https://github.com/psychofict/codexwatch)'s
+opt-in `autohop` runs `codexhop use` when the live login is nearly spent.
 
 **Two accounts with the same email?** One email in two ChatGPT workspaces is two
 logins, and codexhop keeps them apart. `chop list` adds a WORKSPACE column when
@@ -187,7 +198,9 @@ and report anything that could expose a login through
 [SECURITY.md](https://github.com/psychofict/codexhop/blob/main/SECURITY.md).
 
 codexhop is built by [Ebenworks](https://ebenworks.co/), which also makes
-[claudehop](https://github.com/psychofict/claudehop) for Claude Code.
+[claudehop](https://github.com/psychofict/claudehop) for Claude Code and
+[codexwatch](https://github.com/psychofict/codexwatch), which tracks Codex usage
+and plan limits.
 
 MIT licence. Not affiliated with, endorsed by, or sponsored by OpenAI. "OpenAI",
 "Codex" and "ChatGPT" are trademarks of OpenAI, used here only to say what this
