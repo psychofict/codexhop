@@ -179,10 +179,11 @@ lists what the tool holds and how it protects it.
 --with-api-key` reads the key from standard input, and the result hops like any
 other account.
 
-**Does it switch accounts by itself when one runs out?** No. `chop next` hops
-to another login with room in its 5-hour window, but only when you run it. If
-you want it automatic, [codexwatch](https://github.com/psychofict/codexwatch)'s
-opt-in `autohop` runs `codexhop use` when the live login is nearly spent.
+**Does it switch accounts by itself?** No. A hop happens only when you run
+one, and `chop next` picks only from the list you gave it.
+[codexwatch](https://github.com/psychofict/codexwatch)'s opt-in `autohop` can
+run the hop for you between your own saved accounts when the live one is
+nearly spent.
 
 **Two accounts with the same email?** One email in two ChatGPT workspaces is two
 logins, and codexhop keeps them apart. `chop list` adds a WORKSPACE column when
@@ -200,7 +201,9 @@ and report anything that could expose a login through
 codexhop is built by [Ebenworks](https://ebenworks.co/), which also makes
 [claudehop](https://github.com/psychofict/claudehop) for Claude Code and
 [codexwatch](https://github.com/psychofict/codexwatch), which tracks Codex usage
-and plan limits.
+and plan limits, and, with Statotech Systems, the
+[Claude Usage Widget & Token Tracker](https://github.com/StaticB1/claude_ai_usage_widget)
+for Claude Code.
 
 MIT licence. Not affiliated with, endorsed by, or sponsored by OpenAI. "OpenAI",
 "Codex" and "ChatGPT" are trademarks of OpenAI, used here only to say what this
