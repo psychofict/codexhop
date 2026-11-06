@@ -16,13 +16,18 @@ All notable changes to codexhop are listed here. The format follows
 - `chop provider add <name> --azure ENDPOINT --model DEPLOYMENT`, `--bedrock
   [--region R] [--aws-profile P]` and `--base-url URL [--env-key VAR]` write that
   file. `chop provider [list]`, `set` and `rm` list, change and delete providers.
-  No key is stored by codexhop.
+  No key is stored by codexhop. `--env-key` refuses a value that is not a
+  variable name or looks like a key, an option it does not know is reported by
+  name without its value, and a listing leaves out a key-like `env_key`, an
+  address's user name, password and query, and masks a key-like `NAME=value` in a
+  launcher.
 - `chop run <provider>` runs Codex on a provider in one terminal.
 - `chop shell-init --wrap-codex` defines a `codex` function that follows a hop to
   a provider, which Codex 0.166's missing default-profile setting makes
   necessary. It calls the new `chop launch`.
 - `chop provider set <name> --launcher COMMAND` starts Codex through a command,
-  for keys held in a vault.
+  for keys held in a vault. It refuses a launcher that sets a variable such as
+  `..._KEY` or `..._TOKEN` to a value.
 - `chop doctor` checks the provider pointer, name clashes, the key variable and
   the shell glue.
 - `chop list --json`, `chop active --json`, `chop whoami --json` and

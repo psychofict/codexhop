@@ -100,10 +100,11 @@ Codex has built in (`openai`, `amazon-bedrock`, `ollama`, `lmstudio`, `gcp`).
 | `--region REGION`, `--aws-profile PROFILE` | `--bedrock` only: written to the profile's `aws` table. |
 | `--base-url URL` | Any other endpoint that speaks the Responses API. |
 | `--model MODEL` | the model, or for Azure the deployment name. Left out for Bedrock and `--base-url`, Codex picks its own default. |
-| `--env-key VAR` | the variable Codex reads the key from. Azure defaults to `AZURE_OPENAI_API_KEY`; with `--base-url` there is none unless you name one. Not for `--bedrock`. |
+| `--env-key VAR` | the variable Codex reads the key from. Azure defaults to `AZURE_OPENAI_API_KEY`; with `--base-url` there is none unless you name one. Not for `--bedrock`. It must be a variable name: letters, digits and `_`, in one case, with at most four digits and at most 40 characters, and an underscore if it is longer than 24. Anything else is refused without being repeated, because it may be a key. |
 | `--launcher COMMAND` | see `provider set`. |
 
-codexhop writes no key into the file and keeps none.
+codexhop writes no key into the file and keeps none. An option it does not know
+is reported by name only, so `--api-key sk-...` typed by mistake is not echoed.
 
 ### `chop provider [list]`
 
@@ -119,6 +120,13 @@ arguments, for when a vault or helper supplies the key. With one set, `chop run`
 and the `codex` function run `COMMAND <arguments>` instead of
 `codex --profile <name> <arguments>`. `--launcher ''` removes it. It is kept in
 `codexhop/providers.json`.
+
+Keep the key out of the command. A launcher that sets a variable whose name
+contains `KEY`, `TOKEN`, `SECRET`, `PASSW`, `CREDENTIAL` or `AUTH` to a value,
+as in `env AZURE_OPENAI_API_KEY=... codex`, is refused, because the launcher is
+saved and listed. Names that end in `_FILE` or `_PATH` are fine, and so is
+`env CODEX_AZURE_PROFILE=azure-agents codex-azure`. The check reads variable
+names only; a key passed as an ordinary argument is not recognised.
 
 ### `chop provider rm <name>`, `chop rm <name>`
 
@@ -298,7 +306,7 @@ Everything lives in `$CODEX_HOME/codexhop/`:
 | `accounts/<name>.json` | the account's login, exactly as Codex writes `auth.json` (600) |
 | `active` | the name of the account codexhop last made live |
 | `provider` | the name of the provider hopped to; absent when there is none |
-| `providers.json` | each provider's launcher, if it has one; no keys |
+| `providers.json` | each provider's launcher, if it has one. `provider set` refuses one that sets a key-looking variable; if you edit one in by hand, it is listed as `NAME=***` |
 | `next` | the logins `chop next` may choose from, one per line |
 | `usage.json` | the last usage reading per account: percentages and times, no tokens |
 | `run/<name>/` | the Codex home a `chop run` session uses |
@@ -308,8 +316,10 @@ Everything lives in `$CODEX_HOME/codexhop/`:
 
 `chop list --json` returns `{"codexHome", "active", "provider", "accounts": [...],
 "providers": [...]}`. Each provider has `name`, `active`, `provider`, `model`,
-`baseUrl`, `region`, `awsProfile`, `envKey` (the variable's name, never a value),
-`launcher` and `file`. Each account has `name`, `active`, `kind` (`chatgpt` or
+`baseUrl` (no user name, password, `?query` or `#fragment`; `null` when the address
+cannot be shown safely), `region`, `awsProfile`, `envKey` (the variable's name;
+`null` when the profile's value looks like a key), `launcher` (a key-looking
+`NAME=value` shows as `NAME=***`; `null` when it is not a command) and `file`. Each account has `name`, `active`, `kind` (`chatgpt` or
 `apikey`), `email`, `plan`, `userId`, `workspaceId`, `expiresAt` and
 `lastRefresh` (epoch seconds), `renewalDue` and `savedAt`.
 

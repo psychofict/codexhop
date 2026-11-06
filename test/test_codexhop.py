@@ -16,6 +16,7 @@ import http.server
 import importlib.util
 import json
 import os
+import shlex
 import shutil
 import stat
 import subprocess
@@ -1003,6 +1004,126 @@ class Providers(Base):
         self.assertIn("res-a.openai.azure.com", shown)
         self.assertRegex(self.run_tool("doctor").stdout,
                          r"provider 'hand' has an env_key that looks like a key")
+
+    def all_output(self, name: str) -> str:
+        """Everything the tool prints about a provider, through each command that lists or starts one."""
+        out = []
+        for args in (("provider", "list"), ("provider", "list", "--json"), ("list",), ("list", "--json"),
+                     ("list", "--long"), ("whoami",), ("whoami", "--json"), ("doctor",), ("doctor", "--json"),
+                     ("active", "--json"), (name,), ("launch", "--", "exec"), ("run", name)):
+            p = self.run_tool(*args, code=None, env={"AZURE_OPENAI_API_KEY": "x"})
+            out.append(p.stdout + p.stderr)
+        return "".join(out)
+
+    def test_a_key_with_underscores_is_neither_taken_nor_shown(self):
+        key = "gsk_" + "aB3dE6gH9jK2mN5pQ8sT1vW4yZ7cF0hJ3kL6nP9r"  # made up, 44 characters
+        p = self.run_tool("provider", "add", "x", "--base-url", "http://h/v1", "--env-key", key, code=2)
+        self.assertNotIn(key, p.stdout + p.stderr)
+        self.assertFalse(os.path.exists(os.path.join(self.codex_home, "x.config.toml")))
+        self.profile("hand", AZURE_PROFILE.replace('"AZURE_OPENAI_API_KEY"', f'"{key}"'))
+        self.assertNotIn(key, self.all_output("hand"))
+        self.assertIsNone(self.providers()["hand"]["envKey"])
+
+    def test_only_a_variable_name_is_taken(self):
+        for i, var in enumerate(("AZURE_OPENAI_API_KEY", "AZURE_OPENAI_API_KEY_2024", "my_vault_key",
+                                 "AWS_BEARER_TOKEN_BEDROCK")):
+            self.run_tool("provider", "add", f"p{i}", "--base-url", "http://h/v1", "--env-key", var)
+            self.assertEqual(self.providers()[f"p{i}"]["envKey"], var)
+        for var in ("my-key", "my key", "1KEY", "MY_KEY=1"):  # short, so only the name rule can refuse them
+            p = self.run_tool("provider", "add", "x", "--base-url", "http://h/v1", "--env-key", var, code=2)
+            self.assertIn("is not a variable name", p.stderr)
+        # each of these is refused by one rule alone: mixed case, digits, length, no underscore in a long one
+        for var in ("AzureKey", "ABCD12345", "AAAAA_" * 7, "ABCDEFGHIJKLMNOPQRSTUVWXYZ"):
+            p = self.run_tool("provider", "add", "x", "--base-url", "http://h/v1", "--env-key", var,
+                              code=2)
+            self.assertIn("looks like a key", p.stderr)
+            self.assertNotIn(var, p.stdout + p.stderr)
+        self.assertFalse(os.path.exists(os.path.join(self.codex_home, "x.config.toml")))
+
+    def test_the_query_and_fragment_of_an_address_are_not_listed(self):
+        self.profile("hand", AZURE_PROFILE.replace(
+            "/openai/v1", "/openai/v1?api-key=QUERYSECRET#FRAGSECRET"))
+        shown = self.all_output("hand")
+        for secret in ("QUERYSECRET", "FRAGSECRET", "api-key"):
+            self.assertNotIn(secret, shown)
+        self.assertEqual(self.providers()["hand"]["baseUrl"], "https://res-a.openai.azure.com/openai/v1")
+
+    def test_a_password_in_the_path_of_an_address_with_no_host_is_not_shown(self):
+        # urlsplit reads "https:////user:pw@host/v1" as no host and a path, and putting it back
+        # together gives the password back unless the result is read again and checked
+        for bad in ("https:////user:PWSECRET@res-a.openai.azure.com/openai/v1", "http://u:PWSECRET@"):
+            self.profile("hand", AZURE_PROFILE.replace("https://res-a.openai.azure.com/openai/v1", bad))
+            self.assertNotIn("PWSECRET", self.all_output("hand"), bad)
+            self.assertIsNone(self.providers()["hand"]["baseUrl"])
+
+    def test_a_malformed_address_does_not_crash_anything(self):
+        # the second address splits fine until its user name is cut off, which leaves "http://[aa::1"
+        for bad in ("http://[bad", "http://]a::1x@[aa::1"):
+            self.profile("bad", AZURE_PROFILE.replace("https://res-a.openai.azure.com/openai/v1", bad))
+            for args in (("list",), ("provider", "list"), ("provider", "list", "--json"), ("list", "--json"),
+                         ("whoami",), ("doctor",), ()):
+                p = self.run_tool(*args, code=None)
+                self.assertNotIn("Traceback", p.stderr, (bad, args))
+            self.assertEqual(self.run_tool("provider", "list").returncode, 0)
+            self.assertIsNone(self.providers()["bad"]["baseUrl"], bad)
+        p = self.run_tool("provider", "add", "y", "--azure", "http://[bad", "--model", "d", code=2)
+        self.assertNotIn("Traceback", p.stderr)
+
+    def test_an_unknown_option_never_repeats_its_value(self):
+        value = "sk-test-" + "zZ9" * 10
+        for extra in (["--api-key", value], [f"--api-key={value}"], ["--a=" + value], ["--env-keys", value]):
+            p = self.run_tool("provider", "add", "x", "--base-url", "http://h/v1", *extra, code=2)
+            self.assertNotIn(value, p.stdout + p.stderr, extra)
+            self.assertIn("unrecognized arguments", p.stderr)
+        p = self.run_tool("provider", "add", "x", "--base-url", "http://h/v1", "--api-key", value, code=2)
+        self.assertIn("--api-key", p.stderr)  # the flag is named, so a typo can be found
+        self.profile("az")
+        p = self.run_tool("provider", "set", "az", "--launcher", "codex", value, code=2)
+        self.assertNotIn(value, p.stdout + p.stderr)
+        self.assertFalse(os.path.exists(os.path.join(self.codex_home, "x.config.toml")))
+
+    def test_a_launcher_cannot_carry_a_key(self):
+        value = "sk-test-" + "zZ9" * 10
+        self.profile("az")
+        for launcher in (f"env AZURE_OPENAI_API_KEY={value} codex", f"env my_token='{value}' codex",
+                         f"env X=1 AWS_BEARER_TOKEN_BEDROCK={value} codex"):
+            p = self.run_tool("provider", "set", "az", "--launcher", launcher, code=2)
+            self.assertNotIn(value, p.stdout + p.stderr)
+            self.assertRegex(p.stderr, r"sets \w+ to a value")
+            p = self.run_tool("provider", "add", "x", "--bedrock", "--launcher", launcher, code=2)
+            self.assertNotIn(value, p.stdout + p.stderr)
+        self.assertFalse(os.path.exists(os.path.join(self.codex_home, "x.config.toml")))
+        self.assertFalse(os.path.exists(os.path.join(self.store, "providers.json")))
+
+    def test_a_launcher_may_set_other_variables(self):
+        self.profile("az")
+        for launcher in ("env CODEX_AZURE_PROFILE=azure-agents codex", "env AZURE_KEY_FILE=/run/k codex"):
+            self.run_tool("provider", "set", "az", "--launcher", launcher)
+            self.assertEqual(self.providers()["az"]["launcher"], launcher)
+        self.run_tool("az")
+        self.run_tool("launch", "--", "exec")
+        self.assertEqual(self.codex_calls()[-1]["argv"], ["exec"])  # `env ... codex` ran the fake codex
+
+    def test_a_key_in_a_hand_edited_launcher_is_masked_but_still_runs(self):
+        value = "sk-test-" + "zZ9" * 10
+        proof = os.path.join(self.codex_home, "proof.txt")
+        self.profile("az")
+        script = f'printf %s "$AZURE_OPENAI_API_KEY" > {proof}'
+        launcher = f"env AZURE_OPENAI_API_KEY={value} sh -c {shlex.quote(script)} sh"
+        with open(os.path.join(self.store, "providers.json"), "w") as f:
+            json.dump({"az": {"launcher": launcher}}, f)
+        shown = self.all_output("az")
+        self.assertNotIn(value, shown)
+        listed = self.providers()["az"]["launcher"]
+        self.assertIn("AZURE_OPENAI_API_KEY=***", listed)
+        self.assertNotIn(value, listed)
+        self.assertIn("launcher: env AZURE_OPENAI_API_KEY=***", self.run_tool("provider", "list").stdout)
+        self.assertEqual(self.text(proof), value)  # masked for listing only; the launcher ran as written
+        with open(os.path.join(self.store, "providers.json"), "w") as f:
+            json.dump({"az": {"launcher": f"env AZURE_OPENAI_API_KEY={value} 'unterminated"}}, f)
+        self.assertNotIn(value, self.all_output("az"))
+        self.assertIsNone(self.providers()["az"]["launcher"])
+        self.assertIn("(unreadable)", self.run_tool("provider", "list").stdout)
 
     def test_add_refuses_what_would_not_work(self):
         self.run_tool("provider", "add", "az", "--azure", "https://res-a.openai.azure.com", "--model", "d")

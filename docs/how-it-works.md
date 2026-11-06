@@ -218,6 +218,15 @@ with `chop provider set`, is a command codexhop runs in place of `codex
 --profile`, for the case where something else has to put the key in the
 environment first.
 
+What codexhop prints about a provider is filtered by shape, not by knowing the
+key. A variable name is accepted only if it is one case, has at most four digits,
+is at most 40 characters and, past 24, contains an underscore. An address is shown without its user name,
+password, query and fragment, and not at all if that cannot be done safely. A
+launcher's `NAME=value` word is masked when the name contains `KEY`, `TOKEN`,
+`SECRET`, `PASSW`, `CREDENTIAL` or `AUTH`. These catch the usual mistakes. A key
+that matches none of these shapes, written by hand into a profile or passed to a
+launcher as an ordinary argument, would still be listed.
+
 Checked on 6 November 2026 with Codex 0.166.0 started through the real function
 after a hop: the header showed the Azure profile's model, and for a Bedrock
 profile with no model set, Codex's own Bedrock default. That checks the

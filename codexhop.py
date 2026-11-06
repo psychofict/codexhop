@@ -1462,15 +1462,29 @@ def shown_url(url: str | None) -> str | None:
     """An endpoint as listed: without a user name, password, ?query or #fragment, which could hold a key."""
     if not url:
         return url
-    u = urllib.parse.urlsplit(url)
-    return urllib.parse.urlunsplit((u.scheme, u.netloc.rsplit("@", 1)[-1], u.path, "", ""))
+    try:
+        u = urllib.parse.urlsplit(url)
+        host = u.netloc.rsplit("@", 1)[-1]
+        if not host:  # "https:////user:pw@host" has no host: the user name and password are in the path
+            return None
+        out = urllib.parse.urlunsplit((u.scheme, host, u.path, "", ""))
+        urllib.parse.urlsplit(out)  # provider_where splits it again, so make sure that cannot fail
+    except ValueError:  # e.g. "http://[bad": show nothing rather than guess what is safe
+        return None
+    return out
 
 
 def env_name_problem(value: str) -> str | None:
-    """Why this cannot be the name of the variable a key is read from, or None. Never repeats the value."""
+    """Why this cannot be the name of the variable a key is read from, or None. Never repeats the value.
+
+    Only the shape of the name can be checked. A real name is all upper case or all lower case, has
+    a few digits at most, and is short. A key is mixed case, digit-heavy or long.
+    """
     if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", value):
         return "is not a variable name"
-    if len(value) > 24 and "_" not in value:
+    mixed_case = value != value.upper() and value != value.lower()
+    digits = sum(c.isdigit() for c in value)
+    if mixed_case or digits > 4 or len(value) > 40 or (len(value) > 24 and "_" not in value):
         return "looks like a key, not the name of a variable"
     return None
 
@@ -1493,7 +1507,7 @@ def provider_details(name: str) -> dict:
 
 def provider_where(d: dict) -> str:
     if d["baseUrl"]:
-        return urllib.parse.urlsplit(d["baseUrl"]).hostname or d["baseUrl"]
+        return urllib.parse.urlsplit(d["baseUrl"]).hostname or d["baseUrl"]  # shown_url already parsed it
     if d["region"]:
         return d["region"] + (f" ({d['awsProfile']})" if d["awsProfile"] else "")
     return ""
@@ -1511,7 +1525,7 @@ def missing_key(d: dict) -> str | None:
 
 def key_note(d: dict) -> str:
     if d["launcher"]:
-        return f"launcher: {d['launcher']}"
+        return f"launcher: {shown_launcher(d['launcher']) or '(unreadable)'}"
     if d["envKey"]:
         return f"${d['envKey']} {'set' if os.environ.get(d['envKey']) else 'not set'}"
     return "-"
@@ -1519,8 +1533,10 @@ def key_note(d: dict) -> str:
 
 def provider_json(name: str, ptr: str | None) -> dict:
     d = provider_details(name)
-    return {"name": name, "active": name == ptr, **{k: d[k] for k in (
+    out = {"name": name, "active": name == ptr, **{k: d[k] for k in (
         "provider", "model", "baseUrl", "region", "awsProfile", "envKey", "launcher", "file")}}
+    out["launcher"] = shown_launcher(d["launcher"])
+    return out
 
 
 def has_profile_flag(args: list[str]) -> bool:
@@ -1617,12 +1633,35 @@ def provider_rows(ptr: str | None, names: list[str]) -> list[tuple]:
     return [("*" if n == ptr else " ", n, provider_summary(provider_details(n)), "provider") for n in names]
 
 
+class QuietParser(argparse.ArgumentParser):
+    """An argument parser whose complaint about extra arguments names flags and never values.
+
+    Someone who types `--api-key sk-...` by mistake must not see the key repeated in the error.
+    Abbreviations are off so an ambiguous `--a=VALUE` cannot be echoed either.
+    """
+
+    def __init__(self, *a, **kw):
+        super().__init__(*a, allow_abbrev=False, **kw)
+
+    def parse_args(self, args=None, namespace=None):
+        ns, extra = self.parse_known_args(args, namespace)
+        if extra:
+            flags = [w.split("=", 1)[0] for w in extra if w.startswith("--")]
+            others = len(extra) - sum(w.startswith("--") for w in extra)
+            said = flags + ([f"{others} more value{'s' if others > 1 else ''}, not shown"] if others else [])
+            self.error(f"unrecognized arguments: {', '.join(said)}")
+        return ns
+
+
 def _toml(value: str) -> str:
     return json.dumps(value)  # a JSON string is also a TOML basic string
 
 
 def _endpoint(url: str, azure: bool) -> str:
-    u = urllib.parse.urlsplit(url.strip())
+    try:
+        u = urllib.parse.urlsplit(url.strip())
+    except ValueError:
+        die("that is not an endpoint address: use http or https, with no ?query part.", USAGE_EXIT)
     if "@" in u.netloc:
         die("the address has a user name or password in it. Keep the key in an environment variable, "
             "named with --env-key.", USAGE_EXIT)
@@ -1635,7 +1674,7 @@ def _endpoint(url: str, azure: bool) -> str:
 
 
 def provider_add(argv: list[str]):
-    p = argparse.ArgumentParser(
+    p = QuietParser(
         prog=f"{PROG} provider add",
         description="Write a Codex profile for a provider, so `chop <name>` and `chop run <name>` "
                     "can use it.",
@@ -1713,17 +1752,54 @@ def provider_add(argv: list[str]):
     print(f"{DIM}hop to it with `{PROG} {name}`, or run it in one terminal with `{PROG} run {name}`.{OFF}")
 
 
+def _secret_assignment(word: str) -> str | None:
+    """The variable name in a NAME=value word whose name says the value is a key, else None."""
+    m = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)=.", word)
+    if m and re.search(r"KEY|TOKEN|SECRET|PASSW|CREDENTIAL|AUTH", m.group(1), re.I) \
+            and not re.search(r"_(FILE|PATH)$", m.group(1), re.I):
+        return m.group(1)
+    return None
+
+
+def launcher_secrets(command: str) -> list[str]:
+    try:
+        return [n for n in map(_secret_assignment, shlex.split(command)) if n]
+    except ValueError:
+        return []
+
+
+def shown_launcher(command: str | None) -> str | None:
+    """A launcher as listed. A NAME=value word that looks like a key shows as NAME=***.
+
+    One that is not a command at all shows as None: it cannot be checked, so it is not repeated.
+    """
+    if not command:
+        return command
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        return None
+    if not any(map(_secret_assignment, words)):
+        return command
+    return " ".join(w.split("=", 1)[0] + "=***" if _secret_assignment(w) else shlex.quote(w) for w in words)
+
+
 def check_launcher(command: str):
     try:
         first = shlex.split(command)[0]
     except (ValueError, IndexError):
         die("that launcher is not a command.", USAGE_EXIT)
+    names = launcher_secrets(command)
+    if names:
+        die(f"that launcher sets {', '.join(names)} to a value. A launcher is saved in {PROVIDER_SETTINGS} "
+            f"and listed, so keep a key out of it: let the command read the key from your vault or keyring.",
+            USAGE_EXIT)
     if not shutil.which(first):
         info(f"{YELLOW}note:{OFF} '{first}' is not on your PATH here.")
 
 
 def provider_set(argv: list[str]):
-    p = argparse.ArgumentParser(prog=f"{PROG} provider set", description="Change a provider's launcher.")
+    p = QuietParser(prog=f"{PROG} provider set", description="Change a provider's launcher.")
     p.add_argument("name")
     p.add_argument("--launcher", metavar="COMMAND", required=True,
                    help="the command that starts codex on this provider; empty ('') removes it")
@@ -1733,7 +1809,7 @@ def provider_set(argv: list[str]):
     if a.launcher:
         check_launcher(a.launcher)
     set_provider_setting(a.name, "launcher", a.launcher or None)
-    print(f"{a.name}: launcher {a.launcher or 'removed'}")
+    print(f"{a.name}: launcher {shown_launcher(a.launcher) or 'removed'}")
 
 
 def provider_rm(name: str | None, yes: bool = False):

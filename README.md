@@ -117,12 +117,21 @@ hop to which? [1-4, Enter to stay]
 ```
 
 A provider is a Codex profile file, `~/.codex/<name>.config.toml`, so a profile
-you wrote yourself shows up too. codexhop never stores a key. Codex reads an
-Azure key from the variable the profile names (`AZURE_OPENAI_API_KEY` unless you
-pass `--env-key`), and Bedrock uses your AWS credentials; `--region` and
-`--aws-profile` go in the profile. If a vault supplies the key, `chop provider
-set azure --launcher 'my-codex-script'` makes codexhop start Codex through that
-command instead.
+you wrote yourself shows up too. codexhop asks for no key and writes none. Codex
+reads an Azure key from the variable the profile names (`AZURE_OPENAI_API_KEY`
+unless you pass `--env-key`), and Bedrock uses your AWS credentials; `--region`
+and `--aws-profile` go in the profile. If a vault supplies the key, `chop
+provider set azure --launcher 'my-codex-script'` makes codexhop start Codex
+through that command instead.
+
+Keep keys out of profiles and launchers. codexhop looks at the shape of what it
+handles: `--env-key` refuses a value that looks like a key instead of a variable
+name, and `provider set` refuses a launcher that sets a variable such as
+`..._KEY` or `..._TOKEN`. When it lists a profile or launcher you wrote by hand,
+it leaves out a key-like `env_key`, an address's user name, password, `?query`
+and `#fragment`, and shows a key-like `NAME=value` as `NAME=***`. That catches the
+common mistakes. It cannot recognise every key, so a secret you write into a
+file yourself is still in that file.
 
 Codex 0.166 has no setting that picks a default profile, so a hop to a provider
 cannot change a file Codex reads when it starts. codexhop keeps a pointer, and
