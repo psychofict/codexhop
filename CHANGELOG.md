@@ -4,6 +4,37 @@ All notable changes to codexhop are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- Hop to Azure OpenAI, Amazon Bedrock or another endpoint that speaks the
+  Responses API, from the same `chop` menu and `chop <name>` command. A provider
+  is a Codex profile file (`~/.codex/<name>.config.toml`), so existing profiles
+  are listed with no setup. Checked with Codex 0.166.0: it starts on the
+  profile's model. No request to Azure or Bedrock has been tested.
+- `chop provider add <name> --azure ENDPOINT --model DEPLOYMENT`, `--bedrock
+  [--region R] [--aws-profile P]` and `--base-url URL [--env-key VAR]` write that
+  file. `chop provider [list]`, `set` and `rm` list, change and delete providers.
+  No key is stored by codexhop.
+- `chop run <provider>` runs Codex on a provider in one terminal.
+- `chop shell-init --wrap-codex` defines a `codex` function that follows a hop to
+  a provider, which Codex 0.166's missing default-profile setting makes
+  necessary. It calls the new `chop launch`.
+- `chop provider set <name> --launcher COMMAND` starts Codex through a command,
+  for keys held in a vault.
+- `chop doctor` checks the provider pointer, name clashes, the key variable and
+  the shell glue.
+- `chop list --json`, `chop active --json`, `chop whoami --json` and
+  `chop doctor --json` report the provider.
+
+### Changed
+
+- `chop active` prints the provider hopped to, if there is one, before the live
+  account.
+- A name cannot be both an account and a provider; `chop add`, `save` and
+  `rename` refuse one that is already a provider.
+
 ## [1.0.0] - 2026-11-02
 
 The first release.

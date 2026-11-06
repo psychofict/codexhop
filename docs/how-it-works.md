@@ -3,7 +3,7 @@
 codexhop keeps a copy of each account's Codex login and swaps the live one in
 and out. This page covers where the login lives, how codexhop tells logins
 apart, what a hop does, what happens to Codex sessions that are already open,
-and how `run`, `usage` and `add` work.
+and how `run`, `usage` and `add` work, and how a hop to Azure, Bedrock or another provider differs.
 
 The behaviour of Codex described here was read from its source at rust-v0.160.1
 and rust-v0.166.0, and at rust-v0.163.0 to rust-v0.165.0 for the two version
@@ -170,6 +170,59 @@ in its config. It copies the resulting `auth.json` out and deletes the folder.
 The live login is never touched during the sign-in; the
 [reference](commands.md#chop-add-name-codex-login-options) says when the new
 login becomes live.
+
+## Providers
+
+A provider is somewhere other than a ChatGPT login for Codex to get its model
+from. Codex describes one in a profile file, `$CODEX_HOME/<name>.config.toml`,
+and `codex --profile <name>` layers that file over `config.toml`. codexhop calls
+a profile file a provider when it sets `model_provider` to something other than
+`openai`, so Azure OpenAI, Amazon Bedrock and any endpoint you add by hand all
+count. `chop provider add` only writes such a file; nothing else about it is
+codexhop's.
+
+A hop to an account swaps `auth.json`. A hop to a provider cannot work that way,
+because there is no login to swap, and it cannot edit `config.toml` either.
+Measured with Codex 0.166.0 on 6 November 2026: a `profile = "<name>"` line in
+`config.toml` stops Codex at start with "legacy `profile` config is no longer
+supported; use `--profile`", so no default profile can be set there. Writing
+`model_provider` into `config.toml` would collide with whatever the file already
+sets, and codexhop does not edit a file you maintain.
+
+So the hop is a pointer in `codexhop/provider`, and the reading side is the
+`codex` function that `shell-init --wrap-codex` defines. It calls `chop launch`,
+which runs `codex --profile <name>` when the pointer names a provider and plain
+`codex` when it does not. A command that already carries `--profile` or `-p`
+runs as typed. So do the commands `--profile` does not apply to. Codex 0.166.0
+names where it does apply in its own error message (the interactive screen,
+`exec`, `review`, `resume`, `queue`, `archive`, `delete`, `unarchive`, `fork`,
+`mcp`, `sandbox`, `migrate-nfs-db` and `debug prompt-input`) and, measured with
+`doctor`, refuses it everywhere else.
+
+The ChatGPT login is not touched by a hop to a provider or back. It is not read,
+renewed or moved, so a hop back needs none of the checks an account hop makes.
+Sessions that are already open should not be affected either way, since the
+profile is read when Codex starts. That was inferred from how `--profile` works
+and was not measured.
+
+Codex started any way other than through that function, such as an editor
+extension or an app, does not read the pointer (inferred from how shell functions
+work; not tested with any editor). `chop run <provider>` is the explicit
+form: it replaces itself with `codex --profile <name>` and changes nothing.
+
+Keys stay out of codexhop. A profile names the environment variable Codex reads
+an Azure key from (`env_key`), and Bedrock takes its credentials from the AWS
+settings Codex finds on its own (`aws.profile` and `aws.region` in the profile,
+or `AWS_PROFILE`, `AWS_REGION` and the files under `~/.aws`). A launcher, set
+with `chop provider set`, is a command codexhop runs in place of `codex
+--profile`, for the case where something else has to put the key in the
+environment first.
+
+Checked on 6 November 2026 with Codex 0.166.0 started through the real function
+after a hop: the header showed the Azure profile's model, and for a Bedrock
+profile with no model set, Codex's own Bedrock default. That checks the
+profile is picked up. It does not check a request: none was sent to Azure or
+Bedrock.
 
 ## What codexhop does not do
 

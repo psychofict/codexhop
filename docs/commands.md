@@ -8,12 +8,12 @@ adds (`eval "$(codexhop shell-init)"`). Every command works on the Codex home in
 
 ### `chop`
 
-In a terminal, lists your accounts with their last 5-hour reading and asks which
-one to hop to. Type a number, a name or the start of one; Enter stays where you
-are.
+In a terminal, lists your accounts and providers, with each account's last
+5-hour reading, and asks which one to hop to. Type a number, a name or the start
+of one; Enter stays where you are.
 
-With fewer than two accounts, or when the output is not a terminal, it prints
-the listing instead and asks nothing. The menu takes codexhop's lock only after
+With fewer than two accounts and providers, or when the output is not a
+terminal, it prints the listing instead and asks nothing. The menu takes codexhop's lock only after
 you answer, so a menu left open never holds up another command.
 
 ### `chop <name>`, `chop use <name>`
@@ -39,6 +39,11 @@ It stops with nothing changed when:
 If the account's access token has run out, the hop renews it first and saves the
 result, so the login works as it lands.
 
+If the name is a provider and not an account, the hop sets the provider pointer
+instead (see [Providers](#providers)). Hopping to an account clears it and says
+`left provider <name>`. When a name is both, the account wins, and `chop doctor`
+says so.
+
 ### `chop next [names...]`
 
 Hops to another login in the list, the one with the most room in its 5-hour
@@ -63,7 +68,75 @@ config, rules, skills, history and sessions. When the session ends, a login it
 renewed is saved back to the account.
 
 If the account is the live one, this is plain `codex`. The exit status is
-codex's.
+codex's. For a provider, `chop run <provider>` replaces itself with
+`codex --profile <name>` (see [Providers](#providers)).
+
+## Providers
+
+A provider is a Codex profile file, `$CODEX_HOME/<name>.config.toml`, that sets
+`model_provider` to something other than `openai`. Files that do not set it are
+ignored, and so are profiles whose name is not a valid account name. A profile
+you wrote yourself is listed like one codexhop wrote. Codex may add a `[tui]`
+table to the file (it did in testing with 0.166.0); codexhop reads the file and
+never rewrites it.
+
+A hop to a provider is a pointer, `codexhop/provider`, and leaves `auth.json`
+alone. Codex 0.166 rejects a default `profile = "<name>"` in `config.toml`, so
+the pointer is read by `chop launch`, which the `codex` function from
+`chop shell-init --wrap-codex` calls. See
+[how it works](how-it-works.md#providers).
+
+### `chop provider add <name> (--azure ENDPOINT | --bedrock | --base-url URL) [options]`
+
+Writes `$CODEX_HOME/<name>.config.toml` (mode 600). It refuses to overwrite a
+file that exists and to use the name of an account or a command. With
+`--base-url` the name is also the provider's id in the file, so it cannot be one
+Codex has built in (`openai`, `amazon-bedrock`, `ollama`, `lmstudio`, `gcp`).
+
+| Option | Meaning |
+|---|---|
+| `--azure ENDPOINT` | Azure OpenAI. `https://<resource>.openai.azure.com` gets `/openai/v1` added; a full address is used as given. Needs `--model`, because Azure runs the deployment you name. |
+| `--bedrock` | Amazon Bedrock. Credentials and region come from your AWS settings unless you pass the next two. |
+| `--region REGION`, `--aws-profile PROFILE` | `--bedrock` only: written to the profile's `aws` table. |
+| `--base-url URL` | Any other endpoint that speaks the Responses API. |
+| `--model MODEL` | the model, or for Azure the deployment name. Left out for Bedrock and `--base-url`, Codex picks its own default. |
+| `--env-key VAR` | the variable Codex reads the key from. Azure defaults to `AZURE_OPENAI_API_KEY`; with `--base-url` there is none unless you name one. Not for `--bedrock`. |
+| `--launcher COMMAND` | see `provider set`. |
+
+codexhop writes no key into the file and keeps none.
+
+### `chop provider [list]`
+
+Name, provider id, host or region, model and key status of every provider. The
+KEY column says whether the variable the profile reads is set in this shell
+(never its value), or shows the launcher. `*` marks the one hopped to.
+`--json` returns `{"codexHome", "provider", "providers": [...]}`.
+
+### `chop provider set <name> --launcher COMMAND`
+
+A launcher is a command that starts Codex on that provider and receives Codex's
+arguments, for when a vault or helper supplies the key. With one set, `chop run`
+and the `codex` function run `COMMAND <arguments>` instead of
+`codex --profile <name> <arguments>`. `--launcher ''` removes it. It is kept in
+`codexhop/providers.json`.
+
+### `chop provider rm <name>`, `chop rm <name>`
+
+Deletes the profile file if its first line says codexhop wrote it, after asking
+at a terminal (`--yes` skips the question), and clears the pointer if it named
+this provider.
+A file you wrote yourself is left for you to delete.
+
+### `chop launch [--] [codex arguments]`
+
+Starts `codex` the way the hop says. With a provider hopped to, it runs
+`codex --profile <name> <arguments>`, or the provider's launcher; otherwise plain
+`codex`. It leaves alone any command that already names a `--profile` or `-p`,
+and the commands `--profile` does not apply to (`login`, `logout`, `update`,
+`doctor` and the rest). It warns on standard error when the profile's key
+variable is not set. The exit status is codex's.
+
+You do not type this; the `codex` function does.
 
 ## Adding and keeping accounts
 
@@ -117,8 +190,11 @@ anyway; it is here for scripts.
 
 ### `chop list`
 
-Name, email and plan of every saved account; `*` marks the live one. When one
-email appears in two workspaces, a WORKSPACE column tells them apart.
+Name, email and plan of every saved account, then every provider with its
+provider id, host or region and model, and `provider` in the PLAN column. `*`
+marks what new `codex` sessions use: the provider hopped to, or else the live
+login. When one email appears in two workspaces, a WORKSPACE column tells them
+apart.
 
 `--long` adds when each access token runs out, when it was last renewed and when
 the account was saved. No network.
@@ -128,12 +204,15 @@ the account was saved. No network.
 The live login: email, plan, the account it is saved as, and how long its access
 token has left. It also warns when `CODEX_ACCESS_TOKEN` is set, or
 `CODEX_API_KEY`, which `codex exec` reads, because those take the place of the
-saved login. No network.
+saved login. With a provider hopped to, it adds a line naming the provider, and
+with no ChatGPT login at all it names the provider and exits 0. No network.
 
 ### `chop active`
 
-Prints the live account's name, or exits 1 if the live login is not saved. Made
-for prompts and status lines. No network.
+Prints the provider hopped to, or else the live account's name, or exits 1 if
+there is neither. Made for prompts and status lines. `--json` gives both:
+`{"active": <live account>, "provider": <provider or null>, "codexHome"}`. No
+network.
 
 ### `chop usage [name]`
 
@@ -163,15 +242,26 @@ Checks the setup and says what is wrong:
   home's (`--fix` saves the newer one);
 - a pointer to an account that is gone, run homes of deleted accounts and
   leftover temporary files (`--fix` clears them);
-- `CODEX_API_KEY` or `CODEX_ACCESS_TOKEN` set in the environment.
+- `CODEX_API_KEY` or `CODEX_ACCESS_TOKEN` set in the environment;
+- a hop to a provider whose profile file is gone (`--fix` clears the pointer),
+  a name that is both an account and a provider, and, for the provider hopped
+  to, a key variable that is not set in this shell, or a `env_key` that is not a
+  variable name (it may be a key), and a shell that has not loaded the
+  `--wrap-codex` glue, which plain `codex` needs to follow the hop. The glue check
+  goes by the `CODEXHOP_WRAP` variable, which a child shell inherits without the
+  function, so it can say the glue is loaded when it is not.
 
 Exits 1 if an error is left unfixed. It prints no tokens.
 
-### `chop shell-init [--alias NAME]`
+### `chop shell-init [--alias NAME] [--wrap-codex]`
 
 Prints the shell glue for bash and zsh: the `chop` alias (or `NAME`) and tab
-completion for commands, flags and account names. Put
+completion for commands, flags, account names and profile names. Put
 `eval "$(codexhop shell-init)"` in your shell rc.
+
+With `--wrap-codex` it also exports `CODEXHOP_WRAP=1` and defines a `codex`
+function that calls `chop launch`, so plain `codex` follows a hop to a provider.
+If `codexhop` is not on the PATH the function falls back to plain `codex`.
 
 ## Flags
 
@@ -183,6 +273,7 @@ completion for commands, flags and account names. Put
 | `--no-cache`, `--fresh` | `usage`: ask the server even if the last reading is under a minute old |
 | `--fix` | `doctor`: repair what it can |
 | `--alias NAME` | `shell-init`: the short command's name |
+| `--wrap-codex` | `shell-init`: also define a `codex` function that follows a hop to a provider |
 | `--no-color` | plain text (so does `NO_COLOR`) |
 | `-V`, `--version` | print the version |
 
@@ -206,6 +297,8 @@ Everything lives in `$CODEX_HOME/codexhop/`:
 |---|---|
 | `accounts/<name>.json` | the account's login, exactly as Codex writes `auth.json` (600) |
 | `active` | the name of the account codexhop last made live |
+| `provider` | the name of the provider hopped to; absent when there is none |
+| `providers.json` | each provider's launcher, if it has one; no keys |
 | `next` | the logins `chop next` may choose from, one per line |
 | `usage.json` | the last usage reading per account: percentages and times, no tokens |
 | `run/<name>/` | the Codex home a `chop run` session uses |
@@ -213,10 +306,12 @@ Everything lives in `$CODEX_HOME/codexhop/`:
 
 ## JSON
 
-`chop list --json` returns `{"codexHome", "active", "accounts": [...]}`; each
-account has `name`, `active`, `kind` (`chatgpt` or `apikey`), `email`, `plan`,
-`userId`, `workspaceId`, `expiresAt` and `lastRefresh` (epoch seconds),
-`renewalDue` and `savedAt`.
+`chop list --json` returns `{"codexHome", "active", "provider", "accounts": [...],
+"providers": [...]}`. Each provider has `name`, `active`, `provider`, `model`,
+`baseUrl`, `region`, `awsProfile`, `envKey` (the variable's name, never a value),
+`launcher` and `file`. Each account has `name`, `active`, `kind` (`chatgpt` or
+`apikey`), `email`, `plan`, `userId`, `workspaceId`, `expiresAt` and
+`lastRefresh` (epoch seconds), `renewalDue` and `savedAt`.
 
 `chop usage --json` returns `{"accounts": [...]}`; each has `name`, `active`,
 `fetchedAt`, `throttledUntil`, `note` and `usage`, which holds `plan`, `short`

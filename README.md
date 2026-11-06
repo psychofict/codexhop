@@ -13,7 +13,8 @@
 codexhop lets you use several ChatGPT accounts with OpenAI Codex on one machine,
 such as a personal plan and a seat in your company's workspace. It saves each
 account's Codex login, swaps the live one in one command, and can run a
-different account in each terminal.
+different account in each terminal. The same command can also hop on to Azure
+OpenAI, Amazon Bedrock or another provider, and back.
 
 The whole tool is one Python file with no dependencies. A browser opens only
 when you add an account.
@@ -68,7 +69,9 @@ use `chop add work --device-auth`.
 | `chop <name>` | hop to that account |
 | `chop add <name>` | sign in as another account and save it |
 | `chop save [name]` | save the login you have now |
-| `chop run <name> [...]` | run `codex` as that account in this terminal only |
+| `chop run <name> [...]` | run `codex` as that account or provider in this terminal only |
+| `chop provider add <name> ...` | set up Azure OpenAI, Amazon Bedrock or another endpoint ([below](#azure-bedrock-and-other-providers)) |
+| `chop provider [list]` | list the providers and whether each key variable is set in this shell |
 | `chop usage [name]` | 5-hour and weekly usage, with reset times |
 | `chop next [names]` | hop to another login in the list that has 5-hour room ([how it picks](https://github.com/psychofict/codexhop/blob/main/docs/commands.md#chop-next-names)) |
 | `chop whoami` | who the live login is, read from the login itself |
@@ -89,6 +92,55 @@ The session gets its own Codex home. That home holds the account's login and
 links to everything else in yours, so the session has your config, rules,
 skills and history, and `codex resume` sees the same conversations. When the
 session ends, a login it renewed is saved back.
+
+### Azure, Bedrock and other providers
+
+A hop can go to a provider instead of a ChatGPT account. Set one up, then hop to
+it like any account:
+
+```bash
+chop provider add azure --azure https://my-resource.openai.azure.com --model my-deployment
+chop provider add bedrock --bedrock --region us-west-2
+chop azure       # new `codex` sessions run on Azure
+chop home        # and back to a ChatGPT account
+```
+
+```
+$ chop
+      NAME     EMAIL / PROVIDER                                    PLAN
+1.    home     me@gmail.com                                        plus
+2.    work     me@company.com                                      business
+3. *  azure    azure, my-resource.openai.azure.com, my-deployment  provider
+4.    bedrock  amazon-bedrock, us-west-2                           provider
+
+hop to which? [1-4, Enter to stay]
+```
+
+A provider is a Codex profile file, `~/.codex/<name>.config.toml`, so a profile
+you wrote yourself shows up too. codexhop never stores a key. Codex reads an
+Azure key from the variable the profile names (`AZURE_OPENAI_API_KEY` unless you
+pass `--env-key`), and Bedrock uses your AWS credentials; `--region` and
+`--aws-profile` go in the profile. If a vault supplies the key, `chop provider
+set azure --launcher 'my-codex-script'` makes codexhop start Codex through that
+command instead.
+
+Codex 0.166 has no setting that picks a default profile, so a hop to a provider
+cannot change a file Codex reads when it starts. codexhop keeps a pointer, and
+one more line in your shell rc lets plain `codex` follow it:
+
+```bash
+eval "$(codexhop shell-init --wrap-codex)"
+```
+
+That defines a `codex` function that runs `codex --profile <name>` after a hop to
+a provider and plain `codex` otherwise. Your ChatGPT login is not touched, so
+hopping back is immediate. Without the line, `chop run azure` still runs Codex on
+the provider in one terminal. Codex started by an editor extension or an app does
+not go through your shell's function, so it keeps using the ChatGPT login.
+
+What has been checked: Codex 0.166.0 starts on these profiles and shows the
+profile's model, through the `codex` function after a hop. Sending a request to
+Azure or Bedrock this way has not been tested yet.
 
 ### Usage for every account
 
@@ -184,6 +236,12 @@ one, and `chop next` picks only from the list you gave it.
 [codexwatch](https://github.com/psychofict/codexwatch)'s opt-in `autohop` can
 run the hop for you between your own saved accounts when the live one is
 nearly spent.
+
+**Does it hop to Azure and Bedrock?** It sets up a hop to either one and starts
+Codex on that profile; see
+[Azure, Bedrock and other providers](#azure-bedrock-and-other-providers) for what
+has and has not been tested. `--base-url` adds another endpoint that speaks the
+Responses API.
 
 **Two accounts with the same email?** One email in two ChatGPT workspaces is two
 logins, and codexhop keeps them apart. `chop list` adds a WORKSPACE column when

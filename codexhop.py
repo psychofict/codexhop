@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""codexhop - hop OpenAI Codex between several ChatGPT accounts.
+"""codexhop - hop OpenAI Codex between ChatGPT accounts, and on to Azure, Bedrock or another provider.
 
 To switch accounts, run `chop` and pick one. That is the whole tool. (`chop`
 is the short name the shell glue gives `codexhop`; both work.)
 
-  chop                 show your accounts, pick one to hop to
+  chop                 show your accounts and providers, pick one to hop to
   chop <name>          hop straight to that one
   chop add <name>      log in as a new account and save it
 
@@ -12,6 +12,22 @@ A hop changes the login that new `codex` sessions start with. A session that is
 already open keeps the login it started with until it next renews it, and then
 stops with "signed in to another account". To work as two accounts at once,
 give the second terminal its own account with `chop run <name>`.
+
+Providers (Azure OpenAI, Amazon Bedrock, any Responses API endpoint):
+
+  chop provider add <name> --azure <endpoint> --model <deployment>
+  chop provider add <name> --bedrock [--region R] [--aws-profile P]
+  chop provider add <name> --base-url <url> [--env-key VAR]
+  chop provider [list]      the providers set up, and whether each key variable is set here
+  chop provider set <name> --launcher <command>   start codex through a command (a vault)
+  chop provider rm <name>   delete a profile that codexhop wrote
+  chop <provider>           hop to it; hop back with `chop <account>`
+  chop run <provider> [..]  codex on it in this terminal only
+
+A provider is a Codex profile file, ~/.codex/<name>.config.toml, so one you
+wrote yourself works too. A hop to a provider reaches plain `codex` through the
+shell glue: eval "$(codexhop shell-init --wrap-codex)". Your ChatGPT login is
+left as it was.
 
 Now and then:
 
@@ -35,6 +51,7 @@ Flags:
   --no-cache, --fresh  ask the server for usage even if the last reading is under a minute old
   --fix                doctor: repair what it can
   --alias NAME         shell-init: the short command's name (default chop)
+  --wrap-codex         shell-init: also define `codex` so it follows a hop to a provider
   --no-color           plain text
   -V, --version        print the version
 
@@ -57,12 +74,14 @@ explains each one: https://github.com/psychofict/codexhop/blob/main/docs/command
 
 from __future__ import annotations
 
+import argparse
 import base64
 import contextlib
 import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -70,6 +89,7 @@ import sys
 import tempfile
 import textwrap
 import time
+import urllib.parse
 
 VERSION = "1.0.0"
 PROG = "codexhop"
@@ -111,6 +131,8 @@ LOCK_PATH = os.path.join(STORE, ".lock")
 RUN_DIR = os.path.join(STORE, "run")
 USAGE_CACHE = os.path.join(STORE, "usage.json")
 NEXT_LIST = os.path.join(STORE, "next")
+PROVIDER_PTR = os.path.join(STORE, "provider")
+PROVIDER_SETTINGS = os.path.join(STORE, "providers.json")
 
 # Codex's own public OAuth client and token endpoint, and the variables Codex
 # itself reads to override them. Renewing a saved login needs both.
@@ -633,6 +655,8 @@ def check_new_name(name: str) -> str:
     check_name(name)
     if os.path.exists(account_path(name)):
         return name
+    if name in list_providers():
+        die(f"'{name}' is already a provider ({profile_path(name)}). Pick another name.")
     if name in COMMANDS:
         die(f"'{name}' is a {PROG} command, so `{PROG} {name}` could never hop to it. Pick another name.")
     return name
@@ -737,7 +761,7 @@ def slug(ident: dict) -> str:
 
 
 def free_name(base: str) -> str:
-    names = set(list_accounts())
+    names = set(list_accounts()) | set(list_providers())
     if base not in names:
         return base
     i = 2
@@ -1259,6 +1283,8 @@ def cmd_run(name=None, rest=None, **_):
     rest = list(rest or [])
     if not name or name.startswith("-"):
         die(f"usage: {PROG} run <name> [codex arguments]", USAGE_EXIT)
+    if not os.path.exists(account_path(name)) and name in list_providers():
+        run_provider(name, rest)
     require_file_store()
     codex = shutil.which("codex")
     if not codex:
@@ -1302,6 +1328,472 @@ def cmd_run(name=None, rest=None, **_):
         finally:
             _restore_signals(old_signals)
     sys.exit(128 - code if code < 0 else code)
+
+
+# ------------------------------------------------------------------ providers
+#
+# A provider is somewhere other than a ChatGPT login for Codex to get its model
+# from: Azure OpenAI, Amazon Bedrock, or any endpoint that speaks the Responses
+# API. Codex sets one up with a profile file, $CODEX_HOME/<name>.config.toml,
+# that `codex --profile <name>` layers over config.toml. Codex 0.166 no longer
+# reads a default `profile = "<name>"` from config.toml, so a hop to a provider
+# cannot change a file Codex reads when it starts. codexhop keeps a pointer
+# instead (<store>/provider), and the `codex` function that
+# `shell-init --wrap-codex` defines reads it: with a provider hopped to it runs
+# `codex --profile <name>`, otherwise plain `codex`.
+#
+# The ChatGPT login in auth.json is left alone, so hopping back is instant and
+# its renewals go on as before. No key passes through codexhop: Codex reads an
+# Azure key from the variable the profile names (or a launcher you set puts it
+# there), and Bedrock uses the AWS credentials Codex finds on its own.
+
+PROFILE_SUFFIX = ".config.toml"
+MADE_BY = "# Written by codexhop"
+WRAP_VAR = "CODEXHOP_WRAP"  # set by the shell glue's `codex` function
+BUILTIN_PROVIDERS = {"openai", "amazon-bedrock", "ollama", "lmstudio", "gcp"}
+
+# `codex --profile` is taken by the interactive screen and these commands. The
+# others (login, update, doctor, ...) have no profile, so they run as plain codex.
+PROFILE_COMMANDS = {"exec", "e", "review", "resume", "queue", "archive", "delete", "unarchive", "fork",
+                    "mcp", "sandbox", "migrate-nfs-db"}
+OTHER_COMMANDS = {"agents", "login", "logout", "plugin", "app-server", "remote-control", "completion",
+                  "update", "doctor", "apply", "a", "migrate-rollouts", "cloud", "exec-server", "features",
+                  "help"}
+
+
+def profile_path(name: str) -> str:
+    return os.path.join(CODEX_HOME, name + PROFILE_SUFFIX)
+
+
+def table_value(path: str, table: str, key: str) -> str | None:
+    """A string setting under [table] in a TOML file, or None. Python 3.9 and 3.10
+    have no TOML reader, so those read the lines under the table's heading."""
+    try:
+        with open(path, "rb") as f:
+            raw = f.read()
+    except OSError:
+        return None
+    try:
+        import tomllib  # Python 3.11+
+
+        node = tomllib.loads(raw.decode())
+        for part in table.split("."):
+            node = node.get(part) if isinstance(node, dict) else None
+        value = node.get(key) if isinstance(node, dict) else None
+        return value if isinstance(value, str) else None
+    except ImportError:
+        pass
+    except (ValueError, UnicodeDecodeError):
+        return None
+    inside = False
+    for line in raw.decode(errors="replace").splitlines():
+        s = line.strip()
+        if s.startswith("["):
+            inside = s.split("#", 1)[0].strip() == f"[{table}]"
+        elif inside:
+            m = re.match(rf"^{re.escape(key)}\s*=\s*([\"'])(.*?)\1\s*(#.*)?$", s)
+            if m:
+                return m.group(2)
+    return None
+
+
+def list_providers() -> list[str]:
+    """Profile files that point Codex somewhere other than OpenAI's own service."""
+    try:
+        files = os.listdir(CODEX_HOME)
+    except OSError:
+        return []
+    out = []
+    for f in files:
+        name = f[: -len(PROFILE_SUFFIX)]
+        if not f.endswith(PROFILE_SUFFIX) or not VALID_NAME.match(name):
+            continue
+        path = profile_path(name)
+        if os.path.isfile(path) and config_value("model_provider", path) not in (None, "openai"):
+            out.append(name)
+    return sorted(out)
+
+
+def provider_settings() -> dict:
+    return peek_json(PROVIDER_SETTINGS)
+
+
+def set_provider_setting(name: str, key: str, value: str | None):
+    data = provider_settings()
+    entry = dict(data.get(name) or {})
+    if value:
+        entry[key] = value
+    else:
+        entry.pop(key, None)
+    if entry:
+        data[name] = entry
+    else:
+        data.pop(name, None)
+    store_dir()
+    write_json_secure(PROVIDER_SETTINGS, data)
+
+
+def read_provider_ptr(raw: bool = False) -> str | None:
+    """The provider the hop points at. One whose profile file has gone reads as none, unless raw."""
+    try:
+        with open(PROVIDER_PTR) as f:
+            name = f.read().strip()
+    except OSError:
+        return None
+    if raw:
+        return name or None
+    return name if name and name in list_providers() else None
+
+
+def set_provider_ptr(name: str):
+    store_dir()
+    write_text_secure(PROVIDER_PTR, name + "\n")
+
+
+def clear_provider_ptr() -> str | None:
+    """Drop the pointer. Returns the provider it named, if there was one."""
+    was = read_provider_ptr()
+    with contextlib.suppress(OSError):
+        os.remove(PROVIDER_PTR)
+    return was
+
+
+def shown_url(url: str | None) -> str | None:
+    """An endpoint as listed: without a user name, password, ?query or #fragment, which could hold a key."""
+    if not url:
+        return url
+    u = urllib.parse.urlsplit(url)
+    return urllib.parse.urlunsplit((u.scheme, u.netloc.rsplit("@", 1)[-1], u.path, "", ""))
+
+
+def env_name_problem(value: str) -> str | None:
+    """Why this cannot be the name of the variable a key is read from, or None. Never repeats the value."""
+    if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", value):
+        return "is not a variable name"
+    if len(value) > 24 and "_" not in value:
+        return "looks like a key, not the name of a variable"
+    return None
+
+
+def provider_details(name: str) -> dict:
+    """What a provider's profile says, for listing. Never a key: there is none to read."""
+    path = profile_path(name)
+    pid = config_value("model_provider", path)
+    table = f"model_providers.{pid}"
+    env_key = table_value(path, table, "env_key")
+    return {
+        "name": name, "provider": pid, "model": config_value("model", path), "file": path,
+        "baseUrl": shown_url(table_value(path, table, "base_url")),
+        "envKey": None if env_key and env_name_problem(env_key) else env_key,
+        "region": table_value(path, table + ".aws", "region"),
+        "awsProfile": table_value(path, table + ".aws", "profile"),
+        "launcher": (provider_settings().get(name) or {}).get("launcher"),
+    }
+
+
+def provider_where(d: dict) -> str:
+    if d["baseUrl"]:
+        return urllib.parse.urlsplit(d["baseUrl"]).hostname or d["baseUrl"]
+    if d["region"]:
+        return d["region"] + (f" ({d['awsProfile']})" if d["awsProfile"] else "")
+    return ""
+
+
+def provider_summary(d: dict) -> str:
+    return ", ".join(x for x in (d["provider"], provider_where(d), d["model"]) if x)
+
+
+def missing_key(d: dict) -> str | None:
+    """The variable the profile reads its key from, when it is not set here and no launcher sets it."""
+    var = d.get("envKey")
+    return var if var and not d.get("launcher") and not os.environ.get(var) else None
+
+
+def key_note(d: dict) -> str:
+    if d["launcher"]:
+        return f"launcher: {d['launcher']}"
+    if d["envKey"]:
+        return f"${d['envKey']} {'set' if os.environ.get(d['envKey']) else 'not set'}"
+    return "-"
+
+
+def provider_json(name: str, ptr: str | None) -> dict:
+    d = provider_details(name)
+    return {"name": name, "active": name == ptr, **{k: d[k] for k in (
+        "provider", "model", "baseUrl", "region", "awsProfile", "envKey", "launcher", "file")}}
+
+
+def has_profile_flag(args: list[str]) -> bool:
+    return any(a in ("-p", "--profile") or a.startswith("--profile=") for a in args)
+
+
+def takes_profile(args: list[str]) -> bool:
+    """Whether `codex <args>` is something `--profile` applies to."""
+    if any(a in ("-h", "--help", "-V", "--version") for a in args):
+        return False
+    for i, a in enumerate(args):
+        if a == "--":
+            break
+        if a == "debug":  # only `debug prompt-input` reads a profile
+            return args[i + 1:i + 2] == ["prompt-input"]
+        if a in PROFILE_COMMANDS:
+            return True
+        if a in OTHER_COMMANDS:
+            return False
+    return True
+
+
+def exec_provider(name: str, args: list[str]):
+    """Replace this process with codex running on a provider. Does not return."""
+    d = provider_details(name)
+    var = missing_key(d)
+    if var:
+        info(f"{YELLOW}warning:{OFF} ${var} is not set in this shell, and '{name}' reads its key from it.")
+    if d["launcher"]:
+        try:
+            argv = shlex.split(d["launcher"]) + args
+        except ValueError as e:
+            die(f"the launcher for '{name}' is not a command ({e}). "
+                f"Fix it with `{PROG} provider set {name} --launcher ...`")
+    else:
+        codex = shutil.which("codex")
+        if not codex:
+            die("`codex` is not on your PATH.")
+        argv = [codex, "--profile", name, *args]
+    try:
+        os.execvp(argv[0], argv)
+    except OSError as e:
+        die(f"could not start {argv[0]}: {e.strerror}")
+
+
+def run_provider(name: str, rest: list[str]):
+    if has_profile_flag(rest):
+        die(f"'{PROG} run {name}' already picks the profile; drop --profile.", USAGE_EXIT)
+    if not takes_profile(rest):
+        die(f"that `codex` command does not use a profile, so it cannot run as '{name}'. "
+            f"Run it as plain `codex`.", USAGE_EXIT)
+    info(f"{DIM}codex on {name} ({provider_summary(provider_details(name))}){OFF}")
+    exec_provider(name, rest)
+
+
+def cmd_launch(rest=None, **_):
+    """Start `codex` the way the hop says: on the provider hopped to, else as plain codex.
+
+    This is what the `codex` function from `shell-init --wrap-codex` calls. A
+    command with its own --profile, or one that takes no profile, runs untouched.
+    """
+    rest = list(rest or [])
+    name = read_provider_ptr()
+    if name and not has_profile_flag(rest) and takes_profile(rest):
+        exec_provider(name, rest)
+    codex = shutil.which("codex")
+    if not codex:
+        die("`codex` is not on your PATH.")
+    os.execv(codex, [codex, *rest])
+
+
+def hop_provider(name: str):
+    d = provider_details(name)
+    summary = provider_summary(d)
+    if read_provider_ptr() == name:
+        print(f"already on {GREEN}{name}{OFF} ({summary}, provider)")
+        return
+    set_provider_ptr(name)
+    print(f"switched to {GREEN}{name}{OFF} ({summary}, provider)")
+    var = missing_key(d)
+    if var:
+        info(f"{YELLOW}note:{OFF} ${var} is not set in this shell, and '{name}' reads its key from it.")
+    if os.environ.get(WRAP_VAR):
+        print(f"{DIM}new `codex` sessions start on this provider. Your ChatGPT login is left as it was.{OFF}")
+    else:
+        info(
+            f"{YELLOW}note:{OFF} plain `codex` follows this hop only once your shell loads the glue with "
+            f"--wrap-codex: add  eval \"$({PROG} shell-init --wrap-codex)\"  to your shell rc. "
+            f"`{PROG} run {name}` works now."
+        )
+
+
+def provider_rows(ptr: str | None, names: list[str]) -> list[tuple]:
+    return [("*" if n == ptr else " ", n, provider_summary(provider_details(n)), "provider") for n in names]
+
+
+def _toml(value: str) -> str:
+    return json.dumps(value)  # a JSON string is also a TOML basic string
+
+
+def _endpoint(url: str, azure: bool) -> str:
+    u = urllib.parse.urlsplit(url.strip())
+    if "@" in u.netloc:
+        die("the address has a user name or password in it. Keep the key in an environment variable, "
+            "named with --env-key.", USAGE_EXIT)
+    if u.scheme not in ("http", "https") or not u.netloc or u.query or u.fragment:
+        die("that is not an endpoint address: use http or https, with no ?query part.", USAGE_EXIT)
+    path = u.path.rstrip("/")
+    if azure and not path:
+        path = "/openai/v1"
+    return f"{u.scheme}://{u.netloc}{path}"
+
+
+def provider_add(argv: list[str]):
+    p = argparse.ArgumentParser(
+        prog=f"{PROG} provider add",
+        description="Write a Codex profile for a provider, so `chop <name>` and `chop run <name>` "
+                    "can use it.",
+    )
+    p.add_argument("name", help="what you will type to hop to it")
+    kind = p.add_mutually_exclusive_group(required=True)
+    kind.add_argument("--azure", metavar="ENDPOINT",
+                      help="Azure OpenAI, e.g. https://<resource>.openai.azure.com "
+                           "(the /openai/v1 part is added)")
+    kind.add_argument("--bedrock", action="store_true", help="Amazon Bedrock")
+    kind.add_argument("--base-url", metavar="URL", help="any other endpoint that speaks the Responses API")
+    p.add_argument("--model", help="the model, or for Azure the deployment name (required for --azure)")
+    p.add_argument("--env-key", metavar="VAR", help="the variable Codex reads the key from (Azure default: "
+                                                    "AZURE_OPENAI_API_KEY)")
+    p.add_argument("--region", help="--bedrock: the AWS region")
+    p.add_argument("--aws-profile", metavar="PROFILE", help="--bedrock: the AWS profile to use")
+    p.add_argument("--launcher", metavar="COMMAND",
+                   help="a command that starts codex on this provider and gets codex's arguments, for when a "
+                        "vault supplies the key")
+    a = p.parse_args(argv)
+
+    name = check_new_name(a.name)
+    if os.path.exists(account_path(name)):
+        die(f"'{name}' is a saved account. Pick another name.")
+    path = profile_path(name)
+    if os.path.lexists(path):
+        die(f"{path} already exists. Edit it, or pick another name.")
+    problem = env_name_problem(a.env_key) if a.env_key else None
+    if problem:
+        die(f"--env-key {problem}. Give the name of the variable that holds the key, never the key itself.",
+            USAGE_EXIT)
+    if a.launcher:
+        check_launcher(a.launcher)
+
+    lines = [f"{MADE_BY} ({PROG} provider add {name}). `codex --profile {name}` reads it; edit it freely."]
+    if a.bedrock:
+        if a.env_key:
+            die("Amazon Bedrock takes its credentials from your AWS settings; --env-key does not apply.",
+                USAGE_EXIT)
+        lines.append('model_provider = "amazon-bedrock"')
+    else:
+        if a.region or a.aws_profile:
+            die("--region and --aws-profile belong to --bedrock.", USAGE_EXIT)
+        if a.azure and not a.model:
+            die("--azure needs --model: Azure runs the deployment you name.", USAGE_EXIT)
+        provider = "azure" if a.azure else re.sub(r"[^A-Za-z0-9_-]", "-", name)
+        if provider in BUILTIN_PROVIDERS:
+            die(f"'{name}' is the id of a provider built into Codex. Pick another name.", USAGE_EXIT)
+        lines.append(f"model_provider = {_toml(provider)}")
+    if a.model:
+        lines.append(f"model = {_toml(a.model)}")
+    lines.append("")
+    if a.bedrock:
+        aws = [f"{k} = {_toml(v)}" for k, v in (("region", a.region), ("profile", a.aws_profile)) if v]
+        lines += (["[model_providers.amazon-bedrock.aws]", *aws] if aws else
+                  ["# Region and credentials come from your AWS settings (AWS_PROFILE, AWS_REGION, ~/.aws)."])
+    else:
+        env_key = a.env_key or ("AZURE_OPENAI_API_KEY" if a.azure else None)
+        lines += [
+            f"[model_providers.{provider}]",
+            f"name = {_toml('Azure OpenAI' if a.azure else name)}",
+            f"base_url = {_toml(_endpoint(a.azure or a.base_url, bool(a.azure)))}",
+        ]
+        if env_key:
+            lines.append(f"env_key = {_toml(env_key)}")
+        lines.append('wire_api = "responses"')
+    os.makedirs(CODEX_HOME, mode=0o700, exist_ok=True)
+    write_text_secure(path, "\n".join(lines) + "\n")
+    if a.launcher:
+        set_provider_setting(name, "launcher", a.launcher)
+    d = provider_details(name)
+    print(f"added provider {GREEN}{name}{OFF} ({provider_summary(d)}), written to {path}")
+    if d["envKey"] and not a.launcher:
+        print(f"{DIM}Codex reads the key from ${d['envKey']}. {PROG} never stores it.{OFF}")
+    print(f"{DIM}hop to it with `{PROG} {name}`, or run it in one terminal with `{PROG} run {name}`.{OFF}")
+
+
+def check_launcher(command: str):
+    try:
+        first = shlex.split(command)[0]
+    except (ValueError, IndexError):
+        die("that launcher is not a command.", USAGE_EXIT)
+    if not shutil.which(first):
+        info(f"{YELLOW}note:{OFF} '{first}' is not on your PATH here.")
+
+
+def provider_set(argv: list[str]):
+    p = argparse.ArgumentParser(prog=f"{PROG} provider set", description="Change a provider's launcher.")
+    p.add_argument("name")
+    p.add_argument("--launcher", metavar="COMMAND", required=True,
+                   help="the command that starts codex on this provider; empty ('') removes it")
+    a = p.parse_args(argv)
+    if a.name not in list_providers():
+        die(f"no provider called '{a.name}'. Providers: {', '.join(list_providers()) or 'none yet'}")
+    if a.launcher:
+        check_launcher(a.launcher)
+    set_provider_setting(a.name, "launcher", a.launcher or None)
+    print(f"{a.name}: launcher {a.launcher or 'removed'}")
+
+
+def provider_rm(name: str | None, yes: bool = False):
+    if not name:
+        die(f"usage: {PROG} provider rm <name>", USAGE_EXIT)
+    if name not in list_providers():
+        die(f"no provider called '{name}'. Providers: {', '.join(list_providers()) or 'none yet'}")
+    path = profile_path(name)
+    try:
+        with open(path) as f:
+            first = f.readline()
+    except OSError as e:
+        die(f"could not read {path}: {e.strerror}")
+    if not first.startswith(MADE_BY):
+        die(f"{path} was not written by {PROG}, so it is yours to delete; "
+            f"`{PROG}` stops listing it once it is gone.")
+    if not confirm(f"delete provider '{name}' ({path})?", yes):
+        die("aborted")
+    os.remove(path)
+    set_provider_setting(name, "launcher", None)
+    if read_provider_ptr(raw=True) == name:
+        clear_provider_ptr()
+    print(f"deleted {name}")
+
+
+def cmd_provider(args=None, **_):
+    """chop provider [list | add | set | rm]"""
+    args = list(args or [])
+    sub, rest = (args[0], args[1:]) if args else ("list", [])
+    yes = any(a in ("-y", "--yes") for a in rest)
+    as_json = "--json" in rest
+    rest = [a for a in rest if a not in ("-y", "--yes", "--json", "--no-color")]
+    if sub in ("list", "ls"):
+        names, ptr = list_providers(), read_provider_ptr()
+        if as_json:
+            print(json.dumps({"codexHome": CODEX_HOME, "provider": ptr,
+                              "providers": [provider_json(n, ptr) for n in names]}, indent=2))
+        elif not names:
+            info("No providers yet.")
+            info(f"Add one with:  {PROG} provider add <name> --azure <endpoint> --model <deployment>")
+            info(f"          or:  {PROG} provider add <name> --bedrock --region <region>")
+        else:
+            rows = []
+            for n in names:
+                d = provider_details(n)
+                rows.append(("*" if n == ptr else " ", n, d["provider"] or "?", provider_where(d) or "-",
+                             d["model"] or "(Codex default)", key_note(d)))
+            print_table(("", "NAME", "PROVIDER", "WHERE", "MODEL", "KEY"), rows,
+                        {i for i, n in enumerate(names) if n == ptr})
+        return
+    if sub in ("add", "set", "rm", "remove", "delete"):
+        with lock():
+            if sub == "add":
+                provider_add(rest)
+            elif sub == "set":
+                provider_set(rest)
+            else:
+                provider_rm(rest[0] if rest else None, yes)
+        return
+    die(f"unknown provider command '{sub}'. Try: {PROG} provider list | add | set | rm", USAGE_EXIT)
 
 
 # ---------------------------------------------------------------------- usage
@@ -1687,9 +2179,11 @@ def account_json(n: str, doc: dict, cur: str | None) -> dict:
 
 def cmd_list(as_json=False, long_=False, **_):
     names = list_accounts()
+    provs = [p for p in list_providers() if p not in names]
+    ptr = read_provider_ptr()
     live = peek_json(AUTH_FILE)
     cur = active_name()
-    if not names and not as_json:
+    if not names and not provs and not as_json:
         info("No accounts saved yet.")
         if live:
             info(f"You are logged in - save this one with:  {PROG} save <name>")
@@ -1699,27 +2193,35 @@ def cmd_list(as_json=False, long_=False, **_):
     docs = effective_logins(names, cur, live)
 
     if as_json:
-        print(json.dumps({"codexHome": CODEX_HOME, "active": cur,
-                          "accounts": [account_json(n, docs[n], cur) for n in names]}, indent=2))
+        print(json.dumps({"codexHome": CODEX_HOME, "active": cur, "provider": ptr,
+                          "accounts": [account_json(n, docs[n], cur) for n in names],
+                          "providers": [provider_json(n, ptr) for n in provs]}, indent=2))
         return
 
     idents = {n: identity(docs[n]) for n in names}
     emails = [i.get("email") for i in idents.values() if i.get("email")]
     # One email in two workspaces is two logins; only then is the workspace worth a column.
     show_ws = len(emails) != len(set(emails))
-    hdr = ("", "NAME", "EMAIL", "PLAN") + (("WORKSPACE",) if show_ws else ())
+    hdr = ("", "NAME", "EMAIL / PROVIDER" if provs else "EMAIL", "PLAN") + (("WORKSPACE",) if show_ws else ())
     if long_:
         hdr += ("ACCESS", "RENEWED", "SAVED")
     rows = []
     for n in names:
         ident = idents[n]
-        row = ("*" if n == cur else " ", n, who(ident) if ident else "?", ident.get("plan") or "?")
+        # While a provider is hopped to, new `codex` sessions use it: the star is on that, not on the login.
+        star = "*" if n == cur and not ptr else " "
+        row = (star, n, who(ident) if ident else "?", ident.get("plan") or "?")
         if show_ws:
             row += ((ident.get("account") or "?")[:8],)
         if long_:
             row += (expiry_note(docs[n]), renewed_note(docs[n]), saved_at(n))
         rows.append(row)
-    print_table(hdr, rows, {i for i, n in enumerate(names) if n == cur})
+    lit = {i for i, n in enumerate(names) if n == cur and not ptr}
+    for r in provider_rows(ptr, provs):
+        if r[0] == "*":
+            lit.add(len(rows))
+        rows.append(r + ("",) * (len(hdr) - 4))
+    print_table(hdr, rows, lit)
 
     due = [n for n in names if renewal_due(docs[n]) and n != cur]
     if due:
@@ -1738,12 +2240,14 @@ def cmd_pick(yes=False, as_json=False, long_=False, **_):
     when there is nobody at a terminal to answer.
     """
     names = list_accounts()
-    if len(names) < 2 or not (sys.stdin.isatty() and sys.stdout.isatty()):
+    provs = [p for p in list_providers() if p not in names]
+    if len(names) + len(provs) < 2 or not (sys.stdin.isatty() and sys.stdout.isatty()):
         cmd_list(as_json=as_json, long_=long_)
         return
 
     live = peek_json(AUTH_FILE)
     cur = active_name()
+    ptr = read_provider_ptr()
     docs = effective_logins(names, cur, live)
     # Which one to pick is mostly a question of who has room left, so show the
     # last 5-hour reading `chop usage` saved. Read from the cache, never asked
@@ -1763,24 +2267,33 @@ def cmd_pick(yes=False, as_json=False, long_=False, **_):
         return cell if age < 900 else f"{cell} ({countdown(age)} ago)"
 
     show_5h = any((cache.get(n) or {}).get("usage") for n in names)
-    rows = [
-        (f"{i}. *" if n == cur else f"{i}.", n, who(identity(docs[n])), identity(docs[n]).get("plan") or "?")
-        + ((last_5h(n),) if show_5h else ())
-        for i, n in enumerate(names, 1)
-    ]
-    lit = {i for i, n in enumerate(names) if n == cur}
-    print_table(("", "NAME", "EMAIL", "PLAN") + (("5H USED",) if show_5h else ()), rows, lit)
+    choices = names + provs
+
+    def menu_row(i: int, n: str) -> tuple:
+        if n in provs:
+            row = (f"{i}. *" if n == ptr else f"{i}.", n, provider_summary(provider_details(n)), "provider")
+            return row + (("-",) if show_5h else ())
+        star = n == cur and not ptr  # with a provider hopped to, it is the one new sessions use
+        return (
+            (f"{i}. *" if star else f"{i}.", n, who(identity(docs[n])), identity(docs[n]).get("plan") or "?")
+            + ((last_5h(n),) if show_5h else ())
+        )
+
+    rows = [menu_row(i, n) for i, n in enumerate(choices, 1)]
+    lit = {i for i, n in enumerate(choices) if (n == ptr if n in provs else n == cur and not ptr)}
+    hdr = ("", "NAME", "EMAIL / PROVIDER" if provs else "EMAIL", "PLAN") + (("5H USED",) if show_5h else ())
+    print_table(hdr, rows, lit)
     try:
-        answer = input(f"\nhop to which? [1-{len(names)}, Enter to stay] ").strip()
+        answer = input(f"\nhop to which? [1-{len(choices)}, Enter to stay] ").strip()
     except (EOFError, KeyboardInterrupt):
         print()
         return
     if not answer:
         return
-    if answer.isdigit() and 1 <= int(answer) <= len(names):
-        chosen = names[int(answer) - 1]
+    if answer.isdigit() and 1 <= int(answer) <= len(choices):
+        chosen = choices[int(answer) - 1]
     else:  # a name, or enough of one to be unambiguous
-        hits = [n for n in names if n == answer] or [n for n in names if n.startswith(answer)]
+        hits = [n for n in choices if n == answer] or [n for n in choices if n.startswith(answer)]
         if len(hits) != 1:
             die(f"'{answer}' is not one of them. Pick a number, or a name.", USAGE_EXIT)
         chosen = hits[0]
@@ -1788,30 +2301,37 @@ def cmd_pick(yes=False, as_json=False, long_=False, **_):
     # The menu was read without the lock, and a menu can stay open for an hour
     # while something else hops. Take the lock now and decide from what is live.
     with lock():
-        if chosen == active_name():
+        if chosen == active_name() and not read_provider_ptr():
             print(f"already on {GREEN}{chosen}{OFF}")
             return
         cmd_use(name=chosen, yes=yes)
 
 
 def cmd_active(as_json=False, **_):
-    cur = active_name()
+    """The name new `codex` sessions start as: the provider hopped to, else the live login's account."""
+    cur, ptr = active_name(), read_provider_ptr()
     if as_json:
-        print(json.dumps({"active": cur, "codexHome": CODEX_HOME}))
-    elif cur:
-        print(cur)
+        print(json.dumps({"active": cur, "provider": ptr, "codexHome": CODEX_HOME}))
+    elif ptr or cur:
+        print(ptr or cur)
     else:
         sys.exit(1)
 
 
 def cmd_whoami(as_json=False, **_):
     live = peek_json(AUTH_FILE)
+    ptr = read_provider_ptr()
+    prov = f"{ptr} ({provider_summary(provider_details(ptr))})" if ptr else None
     if not live:
         if as_json:
-            print(json.dumps({"loggedIn": False, "codexHome": CODEX_HOME}))
+            print(json.dumps({"loggedIn": False, "codexHome": CODEX_HOME, "provider": ptr}))
+        elif prov:
+            print(f"{BOLD}provider {prov}{OFF}  (no ChatGPT login)")
         else:
             print("not logged in")
-        sys.exit(1)
+        if not ptr:
+            sys.exit(1)
+        return
     ident = identity(live)
     name = active_name()
     overrides = env_overrides()
@@ -1820,11 +2340,13 @@ def cmd_whoami(as_json=False, **_):
             "loggedIn": True, "codexHome": CODEX_HOME, "account": name, "kind": ident.get("kind"),
             "email": ident.get("email"), "plan": ident.get("plan"), "userId": ident.get("user"),
             "workspaceId": ident.get("account"), "expiresAt": ident.get("expiresAt"),
-            "lastRefresh": ident.get("lastRefresh"), "envOverrides": overrides,
+            "lastRefresh": ident.get("lastRefresh"), "envOverrides": overrides, "provider": ptr,
         }, indent=2))
         return
     tail = f"  access: {expiry_note(live)}" if ident.get("kind") == "chatgpt" else ""
     print(f"{BOLD}{who(ident)}{OFF}  [{ident.get('plan') or '?'}]  saved as: {name or '(unsaved)'}{tail}")
+    if prov:
+        print(f"hopped to provider {BOLD}{prov}{OFF}: new `codex` sessions use it, not this login")
     for var in overrides:
         info(f"{YELLOW}warning:{OFF} ${var} is set in this shell and overrides the saved login.")
 
@@ -1923,6 +2445,9 @@ def cmd_renew(name=None, yes=False, **_):
 def cmd_use(name=None, yes=False, **_):
     if not name:
         die(f"usage: {PROG} use <name>", USAGE_EXIT)
+    if not os.path.exists(account_path(name)) and name in list_providers():
+        hop_provider(name)
+        return
     require_file_store()
     target = load_account(name)
     tid = identity(target)
@@ -1935,7 +2460,12 @@ def cmd_use(name=None, yes=False, **_):
         with codex_auth_lock():
             file_login(read_live(), prefer=name)
         set_active_ptr(name)
-        print(f"already on {GREEN}{name}{OFF} ({who(tid)})")
+        left = clear_provider_ptr()
+        if left:
+            print(f"switched to {GREEN}{name}{OFF} ({who(tid)}, {tid.get('plan') or '?'}); "
+                  f"left provider {left}")
+        else:
+            print(f"already on {GREEN}{name}{OFF} ({who(tid)})")
         return
 
     pids = run_pids(name)
@@ -1986,7 +2516,9 @@ def cmd_use(name=None, yes=False, **_):
             was = file_login(live) or was
         write_live(target)
     set_active_ptr(name)
-    print(f"switched to {GREEN}{name}{OFF} ({who(tid)}, {tid.get('plan') or '?'})")
+    left = clear_provider_ptr()
+    print(f"switched to {GREEN}{name}{OFF} ({who(tid)}, {tid.get('plan') or '?'})"
+          + (f"; left provider {left}" if left else ""))
     if codex_live and version and version < CODEX_CHECKS_RENEWAL:
         info(
             f"{YELLOW}note:{OFF} Codex {vstr(version)} can save an open session's renewal over the new "
@@ -2070,6 +2602,9 @@ def cmd_add(name=None, yes=False, rest=None, **_):
 def cmd_rm(name=None, yes=False, **_):
     if not name:
         die(f"usage: {PROG} rm <name>", USAGE_EXIT)
+    if not os.path.exists(account_path(name)) and name in list_providers():
+        provider_rm(name, yes)
+        return
     load_account(name)  # existence check
     pids = run_pids(name)
     if pids:
@@ -2224,9 +2759,35 @@ def cmd_doctor(fix=False, as_json=False, **_):
             note("warn", f"active pointer named '{ptr}', which is not a saved account", "reset")
         else:
             note("error", f"active pointer names '{ptr}', which is not a saved account; --fix resets it")
+    provs = list_providers()
+    pptr = read_provider_ptr(raw=True)
+    if pptr and pptr not in provs:
+        if fix:
+            clear_provider_ptr()
+            note("warn", f"the hop pointed at provider '{pptr}', whose profile file is gone", "reset")
+        else:
+            note("warn", f"the hop points at provider '{pptr}', whose profile file {profile_path(pptr)} is "
+                         f"gone; --fix resets it")
+    for n in provs:
+        if n in names:
+            note("warn", f"'{n}' is both a saved account and a provider profile; `{PROG} {n}` hops to the "
+                         f"account. Rename one of them")
+    for n in provs:
+        raw = table_value(profile_path(n), f"model_providers.{provider_details(n)['provider']}", "env_key")
+        problem = env_name_problem(raw) if raw else None
+        if problem:
+            note("warn", f"provider '{n}' has an env_key that {problem}, so Codex will find no key there, "
+                         f"and a key may be written in {profile_path(n)}")
+    if pptr in provs:
+        var = missing_key(provider_details(pptr))
+        if var:
+            note("warn", f"provider '{pptr}' reads its key from ${var}, which is not set in this shell")
+        if not os.environ.get(WRAP_VAR):
+            note("warn", f"the hop to provider '{pptr}' reaches plain `codex` only through the shell glue, "
+                         f"and this shell has not loaded it: eval \"$({PROG} shell-init --wrap-codex)\"")
     if live and cur is None:
         note("warn", f"the live login ({who(lid)}) is not saved; `{PROG} save <name>`")
-    if not live:
+    if not live and not pptr:
         note("warn", "not logged in right now")
 
     if os.path.isdir(RUN_DIR):
@@ -2263,7 +2824,7 @@ def cmd_doctor(fix=False, as_json=False, **_):
         print(json.dumps({
             "version": VERSION, "codexVersion": vstr(version) if version else None, "codexHome": CODEX_HOME,
             "store": STORE, "credentialsStore": mode, "accounts": names, "active": active_name(),
-            "problems": problems,
+            "providers": provs, "provider": read_provider_ptr(), "problems": problems,
         }, indent=2))
     else:
         print(f"{BOLD}{PROG} {VERSION}{OFF}")
@@ -2271,6 +2832,8 @@ def cmd_doctor(fix=False, as_json=False, **_):
         print(f"  codex home   {CODEX_HOME} (login kept in: {mode})")
         print(f"  store        {STORE} ({len(names)} saved)")
         print(f"  active       {active_name() or '(none)'}")
+        if provs:
+            print(f"  provider     {read_provider_ptr() or '(none hopped to)'} ({len(provs)} set up)")
         print()
         if not [p for p in problems if p["level"] != "info"]:
             print(f"{GREEN}no problems found{OFF}")
@@ -2291,7 +2854,7 @@ def cmd_version(**_):
 
 
 # Second names for a command, kept working but not worth offering on TAB.
-ALIASES = {"ls", "current", "switch", "login", "remove", "delete", "mv", "check", "refresh"}
+ALIASES = {"ls", "current", "switch", "login", "remove", "delete", "mv", "check", "refresh", "launch"}
 
 
 def _completion_words() -> tuple[str, str]:
@@ -2300,11 +2863,13 @@ def _completion_words() -> tuple[str, str]:
     return verbs, flags
 
 
-def cmd_shell_init(alias=None, **_):
+def cmd_shell_init(alias=None, wrap_codex=False, **_):
     """Print shell glue: `eval "$(codexhop shell-init)"` in your shell rc.
 
     It adds the short command (`chop`, or whatever --alias names) and
-    tab-completion for commands, flags and account names.
+    tab-completion for commands, flags, account and provider names. With
+    --wrap-codex it also defines a `codex` function that follows a hop to a
+    provider (see `launch`).
     """
     alias = alias or DEFAULT_ALIAS
     if not re.match(r"^[A-Za-z_][A-Za-z0-9_-]*$", alias):
@@ -2324,6 +2889,11 @@ def cmd_shell_init(alias=None, **_):
                 [ -e "$f" ] || continue
                 n="${{f##*/}}"
                 printf '%s ' "${{n%.json}}"
+              done
+              for f in "${{CODEX_HOME:-$HOME/.codex}}"/*.config.toml; do
+                [ -e "$f" ] || continue
+                n="${{f##*/}}"
+                printf '%s ' "${{n%.config.toml}}"
               done
             }}
             _codexhop_complete() {{
@@ -2346,6 +2916,21 @@ def cmd_shell_init(alias=None, **_):
             """
         ).rstrip()
     )
+    if wrap_codex:
+        print(
+            textwrap.dedent(
+                f"""\
+                export {WRAP_VAR}=1
+                codex() {{
+                  if command -v {PROG} >/dev/null 2>&1; then
+                    command {PROG} launch -- "$@"
+                  else
+                    command codex "$@"
+                  fi
+                }}
+                """
+            ).rstrip()
+        )
 
 
 COMMANDS = {
@@ -2362,6 +2947,8 @@ COMMANDS = {
     "usage": cmd_usage,
     "next": cmd_next,
     "run": cmd_run,
+    "provider": cmd_provider,
+    "launch": cmd_launch,
     "doctor": cmd_doctor, "check": cmd_doctor,
     "shell-init": cmd_shell_init,
     "help": cmd_help, "-h": cmd_help, "--help": cmd_help,
@@ -2379,6 +2966,7 @@ FLAGS = {
     "--no-color": "no_color",
     "--no-cache": "no_cache",
     "--fresh": "no_cache",
+    "--wrap-codex": "wrap_codex",
 }
 
 
@@ -2396,9 +2984,19 @@ def main(argv: list[str]):
             rest = [a for a in rest if a not in ("-y", "--yes")]
             cmd_add(name=name, yes=yes, rest=rest)  # takes the lock itself, after the sign-in
         return
+    # `launch` starts codex and `provider` has options of its own, so neither goes through the flag parser.
+    if argv[:1] == ["launch"]:
+        rest = argv[1:]
+        if rest[:1] == ["--"]:
+            rest = rest[1:]
+        cmd_launch(rest=rest)
+        return
+    if argv[:1] == ["provider"]:
+        cmd_provider(argv[1:])
+        return
 
     flags = {"yes": False, "long_": False, "as_json": False, "fix": False, "no_color": False,
-             "no_cache": False, "alias": None}
+             "no_cache": False, "alias": None, "wrap_codex": False}
     args: list[str] = []
     only_positional = False
     it = iter(argv)
@@ -2437,11 +3035,12 @@ def main(argv: list[str]):
     fn = COMMANDS.get(cmd)
     if not fn:
         # `codexhop work` is a shortcut for `codexhop use work`
-        if VALID_NAME.match(cmd) and os.path.exists(account_path(cmd)):
+        if VALID_NAME.match(cmd) and (os.path.exists(account_path(cmd)) or cmd in list_providers()):
             fn, args = cmd_use, ["use", cmd]
         else:
-            known = ", ".join(list_accounts())
-            hint = f" Saved accounts: {known}." if known else ""
+            accounts, provs = list_accounts(), list_providers()
+            known = ", ".join(accounts + provs)
+            hint = f" Saved accounts{' and providers' if provs else ''}: {known}." if known else ""
             die(f"unknown command '{cmd}'. Try: {PROG} help{hint}", USAGE_EXIT)
     if len(args) > 3:
         die(f"too many arguments for '{cmd}'", USAGE_EXIT)

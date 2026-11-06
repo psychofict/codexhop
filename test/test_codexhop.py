@@ -874,5 +874,414 @@ class Housekeeping(Base):
         self.assertIn("no saved account called 'nope'", self.run_tool("use", "nope", code=1).stderr)
 
 
+AZURE_PROFILE = textwrap.dedent('''\
+    model_provider = "azure"
+    model = "gpt-5.4-mini"
+
+    [model_providers.azure]
+    name = "Azure OpenAI"
+    base_url = "https://res-a.openai.azure.com/openai/v1"
+    env_key = "AZURE_OPENAI_API_KEY"
+    wire_api = "responses"
+''')
+
+
+class Providers(Base):
+    """Azure, Bedrock and other providers: profile files, a hop that is a pointer, and `codex --profile`."""
+
+    def setUp(self):
+        super().setUp()
+        self.set_live(login(**A))
+        self.save("ann", self.live())
+        self.save("bob", login(**B))
+        self.ptr = os.path.join(self.store, "provider")
+
+    def profile(self, name: str, text: str = AZURE_PROFILE):
+        with open(os.path.join(self.codex_home, f"{name}.config.toml"), "w") as f:
+            f.write(text)
+
+    def providers(self) -> dict:
+        p = self.run_tool("provider", "list", "--json")
+        return {d["name"]: d for d in json.loads(p.stdout)["providers"]}
+
+    def test_a_profile_file_naming_another_provider_is_one(self):
+        self.profile("az")
+        self.profile("tweak", 'model = "x"\n')  # a profile with no provider is not one
+        self.profile("plain", 'model_provider = "openai"\n')  # nor is one that names OpenAI itself
+        got = self.providers()
+        self.assertEqual(list(got), ["az"])
+        self.assertEqual(got["az"]["provider"], "azure")
+        self.assertEqual(got["az"]["model"], "gpt-5.4-mini")
+        self.assertEqual(got["az"]["baseUrl"], "https://res-a.openai.azure.com/openai/v1")
+        self.assertEqual(got["az"]["envKey"], "AZURE_OPENAI_API_KEY")
+
+    def test_providers_sort_by_name(self):
+        for n in ("azure", "azure-agents", "azure2"):
+            self.profile(n)
+        self.assertEqual(list(self.providers()), ["azure", "azure-agents", "azure2"])
+
+    def test_add_writes_a_profile_codex_can_read(self):
+        p = self.run_tool("provider", "add", "az", "--azure", "https://res-a.openai.azure.com",
+                          "--model", "dep1")
+        self.assertIn("AZURE_OPENAI_API_KEY", p.stdout)
+        self.run_tool("provider", "add", "bd", "--bedrock", "--region", "us-west-2", "--aws-profile", "work")
+        self.run_tool("provider", "add", "local", "--base-url", "http://127.0.0.1:11434/v1",
+                      "--env-key", "LOCAL_KEY")
+        got = self.providers()
+        self.assertEqual(got["az"]["baseUrl"], "https://res-a.openai.azure.com/openai/v1")
+        self.assertEqual((got["az"]["model"], got["az"]["envKey"]), ("dep1", "AZURE_OPENAI_API_KEY"))
+        self.assertEqual((got["bd"]["provider"], got["bd"]["region"], got["bd"]["awsProfile"]),
+                         ("amazon-bedrock", "us-west-2", "work"))
+        self.assertIsNone(got["bd"]["model"])
+        self.assertEqual((got["local"]["provider"], got["local"]["envKey"]), ("local", "LOCAL_KEY"))
+        for n in ("az", "bd", "local"):
+            path = os.path.join(self.codex_home, f"{n}.config.toml")
+            self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
+            self.assertTrue(self.text(path).startswith("# Written by codexhop"))
+            try:
+                import tomllib
+            except ImportError:
+                continue  # Python before 3.11 has no TOML reader to check the file with
+            with open(path, "rb") as f:
+                self.assertEqual(tomllib.load(f)["model_provider"], got[n]["provider"])
+
+    def test_add_writes_exactly_this(self):
+        head = ("# Written by codexhop (codexhop provider add {0}). "
+                "`codex --profile {0}` reads it; edit it freely.\n")
+        self.run_tool("provider", "add", "az", "--azure", "https://res-a.openai.azure.com", "--model", "dep1")
+        self.assertEqual(self.text(os.path.join(self.codex_home, "az.config.toml")), head.format("az") + (
+            'model_provider = "azure"\nmodel = "dep1"\n\n[model_providers.azure]\nname = "Azure OpenAI"\n'
+            'base_url = "https://res-a.openai.azure.com/openai/v1"\nenv_key = "AZURE_OPENAI_API_KEY"\n'
+            'wire_api = "responses"\n'))
+        self.run_tool("provider", "add", "bd", "--bedrock", "--region", "us-west-2", "--aws-profile", "work")
+        self.assertEqual(self.text(os.path.join(self.codex_home, "bd.config.toml")), head.format("bd") + (
+            'model_provider = "amazon-bedrock"\n\n[model_providers.amazon-bedrock.aws]\n'
+            'region = "us-west-2"\nprofile = "work"\n'))
+        self.run_tool("provider", "add", "local", "--base-url", "http://127.0.0.1:11434/v1",
+                      "--env-key", "LOCAL_KEY")
+        local = os.path.join(self.codex_home, "local.config.toml")
+        self.assertEqual(self.text(local), head.format("local") + (
+            'model_provider = "local"\n\n[model_providers.local]\nname = "local"\n'
+            'base_url = "http://127.0.0.1:11434/v1"\nenv_key = "LOCAL_KEY"\n'
+            'wire_api = "responses"\n'))
+        self.run_tool("provider", "add", "local2", "--base-url", "http://127.0.0.1:1/v1")
+        self.assertNotIn("env_key", self.text(os.path.join(self.codex_home, "local2.config.toml")))
+
+    def test_add_refuses_a_query_and_a_bad_launcher_and_writes_nothing(self):
+        p = self.run_tool("provider", "add", "q", "--azure", "https://r.openai.azure.com/openai/v1?api-version=1",
+                          "--model", "d", code=2)
+        self.assertIn("no ?query", p.stderr)
+        p = self.run_tool("provider", "add", "l", "--bedrock", "--launcher", "'unterminated", code=2)
+        self.assertIn("not a command", p.stderr)
+        for n in ("q", "l"):
+            self.assertFalse(os.path.exists(os.path.join(self.codex_home, f"{n}.config.toml")))
+
+    def test_a_key_is_never_taken_or_printed(self):
+        looks_like_a_name = "Zq" + "x9" * 14  # 30 letters and digits, no underscore
+        has_dashes = "sk-test-" + "a1B2c3D4e5F6g7H8i9J0"
+        for value in (looks_like_a_name, has_dashes):
+            p = self.run_tool("provider", "add", "x", "--bedrock", "--env-key", value, code=2)
+            p2 = self.run_tool("provider", "add", "x", "--base-url", "http://h/v1", "--env-key", value,
+                               code=2)
+            for out in (p, p2):
+                self.assertNotIn(value, out.stdout + out.stderr)
+                self.assertIn("--env-key", out.stderr)
+        self.assertFalse(os.path.exists(os.path.join(self.codex_home, "x.config.toml")))
+        secret = "hunter2" + "Q" * 20
+        p = self.run_tool("provider", "add", "x", "--base-url", f"https://user:{secret}@h.example/v1", code=2)
+        self.assertNotIn(secret, p.stdout + p.stderr)
+        self.assertIn("user name or password", p.stderr)
+
+    def test_a_key_in_a_hand_written_profile_is_not_shown(self):
+        key, pw = "Zq" + "x9" * 14, "pw" + "R" * 16
+        self.profile("hand", AZURE_PROFILE.replace('"AZURE_OPENAI_API_KEY"', f'"{key}"').replace(
+            "https://res-a.openai.azure.com", f"https://u:{pw}@res-a.openai.azure.com") + "")
+        shown = "".join(self.run_tool(*a, env={"AZURE_OPENAI_API_KEY": "x"}).stdout for a in (
+            ("provider", "list"), ("provider", "list", "--json"), ("list",), ("list", "--json"), ("doctor",)))
+        self.assertNotIn(key, shown)
+        self.assertNotIn(pw, shown)
+        self.assertIn("res-a.openai.azure.com", shown)
+        self.assertRegex(self.run_tool("doctor").stdout,
+                         r"provider 'hand' has an env_key that looks like a key")
+
+    def test_add_refuses_what_would_not_work(self):
+        self.run_tool("provider", "add", "az", "--azure", "https://res-a.openai.azure.com", "--model", "d")
+        self.assertIn("already a provider", self.run_tool(
+            "provider", "add", "az", "--azure", "https://r.openai.azure.com", "--model", "d", code=1).stderr)
+        self.profile("tweak", 'model = "x"\n')  # a profile file that is not a provider is still in the way
+        self.assertIn("already exists", self.run_tool(
+            "provider", "add", "tweak", "--bedrock", code=1).stderr)
+        self.assertIn("saved account", self.run_tool(
+            "provider", "add", "ann", "--bedrock", code=1).stderr)
+        self.assertIn("needs --model", self.run_tool(
+            "provider", "add", "x", "--azure", "https://r.openai.azure.com", code=2).stderr)
+        self.assertIn("belong to --bedrock", self.run_tool(
+            "provider", "add", "x", "--base-url", "http://h/v1", "--region", "r", code=2).stderr)
+        self.assertIn("does not apply", self.run_tool(
+            "provider", "add", "x", "--bedrock", "--env-key", "K", code=2).stderr)
+        self.assertIn("built into Codex", self.run_tool(
+            "provider", "add", "ollama", "--base-url", "http://h/v1", code=2).stderr)
+        self.assertIn("could never hop", self.run_tool(
+            "provider", "add", "list", "--bedrock", code=1).stderr)
+        self.run_tool("provider", "add", "x", "--azure", "not a url", "--model", "d", code=2)
+
+    def test_an_account_cannot_take_a_providers_name(self):
+        self.profile("az")
+        p = self.run_tool("rename", "bob", "az", code=1)
+        self.assertIn("already a provider", p.stderr)
+
+    def test_hopping_to_a_provider_is_a_pointer_and_leaves_the_login_alone(self):
+        self.profile("az")
+        before = self.text(os.path.join(self.codex_home, "auth.json"))
+        p = self.run_tool("az")
+        self.assertIn("switched to az", p.stdout)
+        self.assertEqual(self.text(self.ptr).strip(), "az")
+        self.assertEqual(self.text(os.path.join(self.codex_home, "auth.json")), before)
+        self.assertEqual(self.run_tool("active").stdout.strip(), "az")
+        self.assertEqual(json.loads(self.run_tool("active", "--json").stdout)["active"], "ann")
+        self.assertIn("already on az", self.run_tool("az").stdout)
+
+    def test_hopping_back_to_an_account_drops_the_pointer(self):
+        self.profile("az")
+        self.run_tool("az")
+        p = self.run_tool("ann")
+        self.assertIn("left provider az", p.stdout)
+        self.assertFalse(os.path.exists(self.ptr))
+        self.run_tool("az")
+        p = self.run_tool("bob")
+        self.assertIn("left provider az", p.stdout)
+        self.assertFalse(os.path.exists(self.ptr))
+        self.assertEqual(self.live()["tokens"]["account_id"], "ws-b")
+        self.assertEqual(self.run_tool("active").stdout.strip(), "bob")
+
+    def test_the_listing_stars_what_new_sessions_use(self):
+        self.profile("az")
+        starred = lambda out: [ln for ln in out.splitlines() if ln.startswith("*")]  # noqa: E731
+        out = self.run_tool("list").stdout
+        self.assertIn("EMAIL / PROVIDER", out)
+        self.assertIn("azure, res-a.openai.azure.com, gpt-5.4-mini", out)
+        self.assertTrue(starred(out)[0].split()[1] == "ann")
+        self.run_tool("az")
+        out = self.run_tool("list").stdout
+        self.assertEqual([ln.split()[1] for ln in starred(out)], ["az"])
+        who = self.run_tool("whoami").stdout
+        self.assertIn("hopped to provider az", who)
+        self.assertEqual(json.loads(self.run_tool("whoami", "--json").stdout)["provider"], "az")
+
+    def test_whoami_with_a_provider_and_no_chatgpt_login(self):
+        self.profile("az")
+        os.remove(os.path.join(self.codex_home, "auth.json"))
+        self.run_tool("whoami", code=1)
+        self.run_tool("az")
+        self.assertIn("provider az", self.run_tool("whoami").stdout)
+
+    def test_launch_follows_the_pointer(self):
+        self.profile("az")
+        self.run_tool("launch", "--", "exec", "hi")
+        self.assertEqual(self.codex_calls()[-1]["argv"], ["exec", "hi"])  # nothing hopped to: plain codex
+        self.run_tool("az")
+        self.run_tool("launch", "--", "exec", "hi")
+        self.assertEqual(self.codex_calls()[-1]["argv"], ["--profile", "az", "exec", "hi"])
+        self.run_tool("launch", "--", "fix the bug")
+        self.assertEqual(self.codex_calls()[-1]["argv"], ["--profile", "az", "fix the bug"])
+        self.assertEqual(self.codex_calls()[-1]["home"], self.codex_home)
+
+    def test_launch_leaves_commands_that_take_no_profile_alone(self):
+        self.profile("az")
+        self.run_tool("az")
+        for args in (["logout"], ["update"], ["doctor"], ["--profile", "other"], ["-p", "other", "exec"]):
+            self.run_tool("launch", "--", *args)
+            self.assertEqual(self.codex_calls()[-1]["argv"], args)
+
+    def test_launch_gives_debug_prompt_input_a_profile_and_help_and_version_none(self):
+        self.profile("az")
+        self.run_tool("az")
+        self.run_tool("launch", "--", "debug", "prompt-input", "hi")
+        self.assertEqual(self.codex_calls()[-1]["argv"], ["--profile", "az", "debug", "prompt-input", "hi"])
+        for args in (["debug", "models"], ["--version"], ["-V"], ["exec", "--help"], ["-h"]):
+            p = self.run_tool("launch", "--", *args)
+            self.assertEqual(self.codex_calls()[-1]["argv"], args)
+            self.assertNotIn("is not set", p.stderr)  # no key warning for a command that needs no key
+
+    def test_launch_passes_the_exit_code_through(self):
+        self.profile("az")
+        self.run_tool("az")
+        self.run_tool("launch", "--", "exec", env={"FAKE_CODEX_EXIT": "3"}, code=3)
+
+    def test_a_launcher_starts_codex_instead(self):
+        self.profile("az")
+        self.run_tool("provider", "set", "az", "--launcher", "codex --via-launcher")
+        self.assertEqual(self.providers()["az"]["launcher"], "codex --via-launcher")
+        self.run_tool("az")
+        self.run_tool("launch", "--", "exec")
+        self.assertEqual(self.codex_calls()[-1]["argv"], ["--via-launcher", "exec"])
+        self.run_tool("run", "az", "review")
+        self.assertEqual(self.codex_calls()[-1]["argv"], ["--via-launcher", "review"])
+        self.run_tool("provider", "set", "az", "--launcher", "")
+        self.assertIsNone(self.providers()["az"]["launcher"])
+
+    def test_run_uses_the_provider_in_this_terminal_only(self):
+        self.profile("az")
+        self.run_tool("run", "az", "exec", "hi")
+        call = self.codex_calls()[-1]
+        self.assertEqual(call["argv"], ["--profile", "az", "exec", "hi"])
+        self.assertEqual(call["home"], self.codex_home)  # no home of its own: there is no login to keep apart
+        self.assertFalse(os.path.exists(self.ptr))
+        self.assertFalse(os.path.exists(os.path.join(self.store, "run", "az")))
+
+    def test_run_refuses_what_a_profile_cannot_do(self):
+        self.profile("az")
+        self.assertIn("does not use a profile", self.run_tool("run", "az", "login", code=2).stderr)
+        p = self.run_tool("run", "az", "--profile", "x", code=2)
+        self.assertIn("already picks the profile", p.stderr)
+
+    def test_a_key_that_is_not_set_is_said_so(self):
+        self.profile("az")
+        p = self.run_tool("run", "az")
+        self.assertIn("$AZURE_OPENAI_API_KEY is not set", p.stderr)
+        key = "zK9" + "x" * 30
+        p = self.run_tool("run", "az", env={"AZURE_OPENAI_API_KEY": key})
+        self.assertNotIn("is not set", p.stderr)
+        self.assertNotIn(key, p.stdout + p.stderr)  # the value is never printed
+        p = self.run_tool("provider", "list")
+        listed = self.run_tool("provider", "list", env={"AZURE_OPENAI_API_KEY": key})
+        self.assertIn("$AZURE_OPENAI_API_KEY set", listed.stdout)
+        self.assertNotIn(key, listed.stdout + listed.stderr)
+        self.assertIn("not set", p.stdout)
+
+    def test_rm_deletes_only_what_codexhop_wrote(self):
+        self.profile("mine")
+        p = self.run_tool("provider", "rm", "mine", "-y", code=1)
+        self.assertIn("was not written by codexhop", p.stderr)
+        self.assertTrue(os.path.exists(os.path.join(self.codex_home, "mine.config.toml")))
+        self.run_tool("provider", "add", "bd", "--bedrock", "--region", "us-west-2")
+        self.run_tool("provider", "set", "bd", "--launcher", "codex --via-launcher")
+        self.assertIn("bd", self.read(os.path.join(self.store, "providers.json")))
+        self.run_tool("bd")
+        self.run_tool("rm", "bd", "-y")
+        self.assertFalse(os.path.exists(os.path.join(self.codex_home, "bd.config.toml")))
+        self.assertFalse(os.path.exists(self.ptr))
+        left = self.read(os.path.join(self.store, "providers.json"))
+        self.assertNotIn("bd", left)  # no launcher left behind
+
+    def test_doctor_reports_a_stale_pointer_and_a_name_clash(self):
+        self.profile("az")
+        self.run_tool("az")
+        os.remove(os.path.join(self.codex_home, "az.config.toml"))
+        self.assertIn("whose profile file", self.run_tool("doctor").stdout)
+        self.assertEqual(self.run_tool("active").stdout.strip(), "ann")  # a pointer to nothing is ignored
+        self.run_tool("doctor", "--fix")
+        self.assertFalse(os.path.exists(self.ptr))
+        self.profile("ann")  # a profile with an account's name
+        self.assertIn("both a saved account and a provider", self.run_tool("doctor").stdout)
+        p = self.run_tool("ann")  # the account wins: it is the live login, and no pointer is set
+        self.assertIn("already on ann", p.stdout)
+        self.assertFalse(os.path.exists(self.ptr))
+        p = self.run_tool("bob")
+        self.assertIn("switched to bob", p.stdout)
+        self.assertEqual(self.live()["tokens"]["account_id"], "ws-b")
+        self.assertFalse(os.path.exists(self.ptr))
+
+    def test_doctor_names_the_key_variable_that_is_not_set(self):
+        self.profile("az")
+        self.run_tool("az")
+        glue = {"CODEXHOP_WRAP": "1"}
+        out = self.run_tool("doctor", env=glue).stdout
+        self.assertIn("provider 'az' reads its key from $AZURE_OPENAI_API_KEY, which is not set", out)
+        out = self.run_tool("doctor", env={**glue, "AZURE_OPENAI_API_KEY": "zK9" + "x" * 30}).stdout
+        self.assertNotIn("reads its key from", out)
+        self.assertNotIn("zK9", out)
+
+    def test_doctor_says_when_the_shell_glue_is_missing(self):
+        self.profile("az")
+        self.run_tool("az")
+        out = self.run_tool("doctor", env={"AZURE_OPENAI_API_KEY": "k"}).stdout
+        self.assertIn("shell-init --wrap-codex", out)
+        out = self.run_tool("doctor", env={"AZURE_OPENAI_API_KEY": "k", "CODEXHOP_WRAP": "1"}).stdout
+        self.assertNotIn("shell glue", out)
+
+    def test_hop_says_when_plain_codex_will_not_follow(self):
+        self.profile("az")
+        p = self.run_tool("az")
+        self.assertIn("--wrap-codex", p.stderr)
+        self.run_tool("ann")
+        p = self.run_tool("az", env={"CODEXHOP_WRAP": "1"})
+        self.assertNotIn("--wrap-codex", p.stderr)
+        self.assertIn("new `codex` sessions start on this provider", p.stdout)
+
+    def test_the_codex_function_follows_the_hop(self):
+        """The real glue in a real bash: `codex` runs on the provider after a hop, plain after a hop back."""
+        self.profile("az")
+        shim = os.path.join(self.bin, "codexhop")
+        with open(shim, "w") as f:
+            f.write(f'#!/bin/sh\nexec "{PYTHON}" "{TOOL}" "$@"\n')
+        os.chmod(shim, 0o755)
+        script = 'eval "$(codexhop shell-init --wrap-codex)"; codex exec one; codexhop az >/dev/null 2>&1; ' \
+                 'codex exec two; codex logout; codexhop ann >/dev/null 2>&1; codex exec three'
+        p = subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=self.env, timeout=60)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual([c["argv"] for c in self.codex_calls() if c["argv"][:1] != ["--version"]], [
+            ["exec", "one"], ["--profile", "az", "exec", "two"], ["logout"], ["exec", "three"]])
+
+    def test_the_codex_function_keeps_arguments_whole(self):
+        self.profile("az")
+        shim = os.path.join(self.bin, "codexhop")
+        with open(shim, "w") as f:
+            f.write(f'#!/bin/sh\nexec "{PYTHON}" "{TOOL}" "$@"\n')
+        os.chmod(shim, 0o755)
+        script = ('eval "$(codexhop shell-init --wrap-codex)"; codexhop az >/dev/null 2>&1; '
+                  "codex exec 'two words' \"it's\" '$HOME' '*' '' -x -- --")
+        p = subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=self.env, timeout=60)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(self.codex_calls()[-1]["argv"], [
+            "--profile", "az", "exec", "two words", "it's", "$HOME", "*", "", "-x", "--", "--"])
+
+    def test_shell_init_wrap_codex_is_opt_in(self):
+        self.assertNotIn("codex()", self.run_tool("shell-init").stdout)
+        out = self.run_tool("shell-init", "--wrap-codex").stdout
+        self.assertIn("codex() {", out)
+        self.assertIn("CODEXHOP_WRAP=1", out)
+        check = subprocess.run(["bash", "-n"], input=out, capture_output=True, text=True)
+        self.assertEqual(check.returncode, 0, check.stderr)
+
+    def test_the_menu_offers_providers_and_hops_to_the_one_you_pick(self):
+        import pty
+        import select
+
+        self.profile("az")
+        pid, fd = pty.fork()
+        if pid == 0:
+            os.execve(PYTHON, [PYTHON, TOOL], {**self.env, "COLUMNS": "120"})
+        out = b""
+        deadline = time.time() + 20
+        while b"hop to which?" not in out and time.time() < deadline:
+            if select.select([fd], [], [], 0.2)[0]:
+                out += os.read(fd, 4096)
+        self.assertIn(b"hop to which? [1-3", out)
+        self.assertIn(b"EMAIL / PROVIDER", out)
+        self.assertRegex(out, rb"3\.\s+az\s+azure, res-a")
+        os.write(fd, b"3\n")
+        while time.time() < deadline:
+            if select.select([fd], [], [], 0.2)[0]:
+                try:
+                    chunk = os.read(fd, 4096)
+                except OSError:
+                    break
+                if not chunk:
+                    break
+                out += chunk
+        os.waitpid(pid, 0)
+        os.close(fd)
+        self.assertEqual(self.text(self.ptr).strip(), "az")
+
+    def test_only_providers_still_list_and_hop(self):
+        shutil.rmtree(self.store)
+        os.remove(os.path.join(self.codex_home, "auth.json"))
+        self.profile("az")
+        self.assertIn("provider", self.run_tool("list").stdout)
+        self.run_tool("az")
+        self.assertEqual(self.text(self.ptr).strip(), "az")
+
+
 if __name__ == "__main__":
     unittest.main()
