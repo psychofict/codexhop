@@ -257,6 +257,19 @@ def write_text_secure(path: str, text: str):
 # those fall back to reading the lines above the first [table].
 
 
+def _toml_string(quote: str, text: str) -> str:
+    """The value of a TOML string read off a line.
+
+    A "basic" string (double quotes) has escapes such as \\u00fc; a 'literal' one (single quotes) has none.
+    """
+    if quote == '"':
+        try:
+            return json.loads(f'"{text}"')  # JSON and TOML spell these escapes alike
+        except ValueError:
+            pass
+    return text
+
+
 def config_value(key: str, path: str | None = None) -> str | None:
     path = path or CONFIG_FILE
     try:
@@ -279,7 +292,7 @@ def config_value(key: str, path: str | None = None) -> str | None:
             break
         m = re.match(rf"^{re.escape(key)}\s*=\s*([\"'])(.*?)\1\s*(#.*)?$", s)
         if m:
-            return m.group(2)
+            return _toml_string(m.group(1), m.group(2))
     return None
 
 
@@ -1393,7 +1406,7 @@ def table_value(path: str, table: str, key: str) -> str | None:
         elif inside:
             m = re.match(rf"^{re.escape(key)}\s*=\s*([\"'])(.*?)\1\s*(#.*)?$", s)
             if m:
-                return m.group(2)
+                return _toml_string(m.group(1), m.group(2))
     return None
 
 
@@ -1583,6 +1596,9 @@ def exec_provider(name: str, args: list[str]):
         os.execvp(argv[0], argv)
     except OSError as e:
         die(f"could not start {argv[0]}: {e.strerror}")
+    except ValueError:  # an empty first word, or a NUL in it
+        die(f"the launcher for '{name}' is not a command. "
+            f"Fix it with `{PROG} provider set {name} --launcher ...`")
 
 
 def run_provider(name: str, rest: list[str]):
@@ -1798,6 +1814,8 @@ def check_launcher(command: str):
     try:
         first = shlex.split(command)[0]
     except (ValueError, IndexError):
+        die("that launcher is not a command.", USAGE_EXIT)
+    if not first.strip() or "\0" in command:
         die("that launcher is not a command.", USAGE_EXIT)
     names = launcher_secrets(command)
     if names:

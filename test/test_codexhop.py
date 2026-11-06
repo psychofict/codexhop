@@ -1171,6 +1171,33 @@ class Providers(Base):
         self.assertFalse(os.path.exists(os.path.join(self.codex_home, "x.config.toml")))
         self.assertFalse(os.path.exists(os.path.join(self.store, "providers.json")))
 
+    def test_a_launcher_that_is_not_a_command_is_refused_and_never_crashes_a_run(self):
+        self.profile("az")
+        for launcher in ("''", "  ", '""'):  # a NUL cannot be an argument; the hand-edited case is below
+            p = self.run_tool("provider", "set", "az", "--launcher", launcher, code=2)
+            self.assertIn("not a command", p.stderr)
+            self.assertNotIn("Traceback", p.stderr)
+        self.assertFalse(os.path.exists(os.path.join(self.store, "providers.json")))
+        for launcher in ("''", "\u0000codex"):  # written by hand
+            with open(os.path.join(self.store, "providers.json"), "w") as f:
+                json.dump({"az": {"launcher": launcher}}, f)
+            for args in (("run", "az"), ("launch", "--")):
+                self.run_tool("az")
+                p = self.run_tool(*args, code=1)
+                self.assertNotIn("Traceback", p.stderr, (launcher, args))
+                self.assertIn("is not a command", p.stderr, (launcher, args))
+
+    def test_escapes_in_a_hand_written_profile_are_read(self):
+        # Python 3.9 and 3.10 have no TOML reader, so this checks their line reader as well as tomllib
+        text = AZURE_PROFILE.replace('model = "gpt-5.4-mini"', 'model = "m\\u00f6del-\\"x\\""')
+        self.profile("hand", text.replace("https://res-a.openai.azure.com/openai/v1",
+                                          "https://b\\u00fccher.example/v1"))
+        got = self.providers()["hand"]
+        self.assertEqual(got["model"], 'm\u00f6del-"x"')
+        self.assertEqual(got["baseUrl"], "https://b\u00fccher.example/v1")
+        self.profile("lit", AZURE_PROFILE.replace('model = "gpt-5.4-mini"', "model = 'a\\u00f6b'"))
+        self.assertEqual(self.providers()["lit"]["model"], "a\\u00f6b")  # a literal string has no escapes
+
     def test_a_launcher_may_set_other_variables(self):
         self.profile("az")
         for launcher in ("env CODEX_AZURE_PROFILE=azure-agents codex", "env AZURE_KEY_FILE=k.txt codex",

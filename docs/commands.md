@@ -134,7 +134,8 @@ saved and listed. Names that end in `_FILE` or `_PATH` are fine, and so is
 `AWS_SECRET_ACCESS_KEY=/...` is still refused. The check reads variable names and
 the start of the value only. A key passed as an ordinary argument is not
 recognised, and neither is one that starts with `/`, `~/` or `./` under a name
-such as `GOOGLE_CREDENTIALS`.
+that has `CREDENTIAL`, `PASSW` or `AUTH` in it but none of `KEY`, `TOKEN` and
+`SECRET`, such as `GOOGLE_CREDENTIALS`.
 
 ### `chop provider rm <name>`, `chop rm <name>`
 
