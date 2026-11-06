@@ -98,7 +98,7 @@ Codex has built in (`openai`, `amazon-bedrock`, `ollama`, `lmstudio`, `gcp`).
 | `--azure ENDPOINT` | Azure OpenAI. `https://<resource>.openai.azure.com` gets `/openai/v1` added; a full address is used as given. Needs `--model`, because Azure runs the deployment you name. |
 | `--bedrock` | Amazon Bedrock. Credentials and region come from your AWS settings unless you pass the next two. |
 | `--region REGION`, `--aws-profile PROFILE` | `--bedrock` only: written to the profile's `aws` table. |
-| `--base-url URL` | Any other endpoint that speaks the Responses API. |
+| `--base-url URL` | Any other endpoint that speaks the Responses API. It needs a host and, if it has a port, plain digits from 0 to 65535; no user name, password or `?query`. |
 | `--model MODEL` | the model, or for Azure the deployment name. Left out for Bedrock and `--base-url`, Codex picks its own default. |
 | `--env-key VAR` | the variable Codex reads the key from. Azure defaults to `AZURE_OPENAI_API_KEY`; with `--base-url` there is none unless you name one. Not for `--bedrock`. It must be a variable name: letters, digits and `_`, in one case, with at most four digits and at most 40 characters, and an underscore if it is longer than 24. Anything else is refused without being repeated, because it may be a key. A real name that is refused can still be written into the profile by hand; codexhop then neither lists it nor checks that it is set. |
 | `--launcher COMMAND` | see `provider set`. |
@@ -326,8 +326,9 @@ Everything lives in `$CODEX_HOME/codexhop/`:
 `chop list --json` returns `{"codexHome", "active", "provider", "accounts": [...],
 "providers": [...]}`. Each provider has `name`, `active`, `provider`, `model`,
 `baseUrl` (no user name, password, `?query` or `#fragment`, with the path as
-written; `null` when the address has no host, has a port that is not a number,
-or does not parse), `region`, `awsProfile`, `envKey` (the variable's name;
+written; `null` when the address has no host, has a port that is not plain digits
+from 0 to 65535, has a symbol or punctuation mark outside ASCII in the host, or
+does not parse), `region`, `awsProfile`, `envKey` (the variable's name;
 `null` when the profile's value looks like a key), `launcher` (a key-looking
 `NAME=value` shows as `NAME=***`; `null` when it is not a command) and `file`. Each account has `name`, `active`, `kind` (`chatgpt` or
 `apikey`), `email`, `plan`, `userId`, `workspaceId`, `expiresAt` and

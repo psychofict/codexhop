@@ -222,17 +222,22 @@ What codexhop prints about a provider is filtered by shape, not by knowing the
 key. A variable name is accepted only if it is one case, has at most four digits,
 is at most 40 characters and, past 24, contains an underscore. An address is
 shown without its user name, password, query and fragment. It is not shown at all
-if it has no host, has a port that is not a number, or does not parse. Its path
-is shown as written, so keep a key out of it. A launcher's `NAME=value` word is
+if it has no host, has a port that is not plain digits from 0 to 65535, has a
+symbol or punctuation mark outside ASCII in the host (a look-alike of `:` could
+hide a password after it), or does not parse. Letters, digits and combining marks
+are fine, so `bücher.example` shows. Its path is shown as written, so keep a key
+out of it. A launcher's `NAME=value` word is
 masked when the name contains `KEY`, `TOKEN`, `SECRET`, `PASSW`, `CREDENTIAL` or
 `AUTH`, unless the name ends in `_FILE` or `_PATH`, or the value is a path (it
 starts with `/`, `~/` or `./`) and the name has none of `KEY`, `TOKEN` and
 `SECRET`. These catch the usual mistakes. A key that matches none of these
 shapes would still be listed, whether written by hand into a profile, put in an
 address path, passed to a launcher as an ordinary argument, or starting with a
-`/` under a name like `GOOGLE_CREDENTIALS`. A `providers.json` that does not
-parse is left alone: `provider add`, `set` and `rm` stop rather than rewrite it
-without the launchers in it.
+`/` under a name like `GOOGLE_CREDENTIALS`. A `providers.json` that
+cannot be used, because it is not JSON, not UTF-8, not an object, or not a file,
+is left alone: `provider add`, `set` and `rm` stop rather than rewrite it without
+the launchers in it. `chop run`, `chop launch` and `chop doctor` say so, because
+a launcher in that file is not used.
 
 Checked on 6 November 2026 with Codex 0.166.0 started through the real function
 after a hop: the header showed the Azure profile's model, and for a Bedrock

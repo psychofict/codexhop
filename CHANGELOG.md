@@ -27,6 +27,12 @@ All notable changes to codexhop are listed here. The format follows
 - `chop shell-init --wrap-codex` defines a `codex` function that follows a hop to
   a provider, which Codex 0.166's missing default-profile setting makes
   necessary. It calls the new `chop launch`.
+- A `providers.json` that cannot be used (not JSON, not UTF-8, not an object, or
+  a directory) is never rewritten: `provider add`, `set` and `rm` stop first.
+  `chop run`, `chop launch` and `chop doctor` say that its launchers are not used.
+- An address whose port is not plain digits from 0 to 65535, or whose host has a
+  symbol or punctuation mark outside ASCII, is refused by `provider add` and not
+  listed. An internationalised host name made of letters still shows.
 - `chop provider set <name> --launcher COMMAND` starts Codex through a command,
   for keys held in a vault. It refuses a launcher that sets a variable such as
   `..._KEY` or `..._TOKEN` to a value.

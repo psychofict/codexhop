@@ -89,6 +89,7 @@ import sys
 import tempfile
 import textwrap
 import time
+import unicodedata
 import urllib.parse
 
 VERSION = "1.0.0"
@@ -1427,12 +1428,39 @@ def list_providers() -> list[str]:
     return sorted(out)
 
 
+def load_provider_settings() -> tuple[dict, str | None]:
+    """providers.json and, if the file is there but unusable, a short reason that repeats none of it."""
+    try:
+        with open(PROVIDER_SETTINGS, encoding="utf-8") as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        return {}, None
+    except (OSError, ValueError, RecursionError) as e:  # ValueError: not JSON, or not UTF-8
+        return {}, f"cannot be read ({type(e).__name__})"
+    if not isinstance(data, dict):
+        return {}, "is not a JSON object"
+    return data, None
+
+
 def provider_settings() -> dict:
-    return peek_json(PROVIDER_SETTINGS)
+    return load_provider_settings()[0]
+
+
+def settings_problem() -> str | None:
+    return load_provider_settings()[1]
+
+
+def strict_provider_settings() -> dict:
+    """providers.json for a command about to change it. Stops if the file is there but unusable, rather
+    than write it again without the launchers it held."""
+    data, problem = load_provider_settings()
+    if problem:
+        die(f"{PROVIDER_SETTINGS} {problem}. Refusing to touch it.")
+    return data
 
 
 def set_provider_setting(name: str, key: str, value: str | None):
-    data = read_json(PROVIDER_SETTINGS)  # stops if it will not parse, rather than dropping every launcher
+    data = strict_provider_settings()
     entry = dict(data[name]) if isinstance(data.get(name), dict) else {}
     if value:
         entry[key] = value
@@ -1471,6 +1499,21 @@ def clear_provider_ptr() -> str | None:
     return was
 
 
+def host_port_ok(hostport: str) -> bool:
+    """Whether a host:port is fit to show or write. The port must be plain digits, 0 to 65535.
+
+    Outside ASCII a host may hold only letters, digits and marks, as an internationalised name does. A
+    symbol or punctuation mark there, such as U+2236, can pass for a colon and hide a password after it.
+    """
+    m = re.fullmatch(r"(\[[^\]]*\]|[^:\[\]]*)(?::([^:]*))?", hostport)
+    if not m or not m.group(1):
+        return False
+    port = m.group(2)
+    if port is not None and not (re.fullmatch(r"[0-9]{0,5}", port) and (not port or int(port) <= 65535)):
+        return False
+    return all(c.isascii() or unicodedata.category(c)[0] in "LMN" for c in m.group(1))
+
+
 def shown_url(url: str | None) -> str | None:
     """An endpoint as listed: without a user name, password, ?query or #fragment, which could hold a key."""
     if not url:
@@ -1480,7 +1523,8 @@ def shown_url(url: str | None) -> str | None:
         host = u.netloc.rsplit("@", 1)[-1]
         if not host:  # "https:////user:pw@host" has no host: the user name and password are in the path
             return None
-        _ = u.port  # raises for a port that is not a number: that may be a password
+        if not host_port_ok(host):  # a port that is not a number may be a password; so may a colon look-alike
+            return None
         out = urllib.parse.urlunsplit((u.scheme, host, u.path, "", ""))
         urllib.parse.urlsplit(out)  # provider_where splits it again, so make sure that cannot fail
     except ValueError:  # e.g. "http://[bad": show nothing rather than guess what is safe
@@ -1578,6 +1622,10 @@ def takes_profile(args: list[str]) -> bool:
 def exec_provider(name: str, args: list[str]):
     """Replace this process with codex running on a provider. Does not return."""
     d = provider_details(name)
+    problem = settings_problem()
+    if problem:
+        info(f"{YELLOW}warning:{OFF} {PROVIDER_SETTINGS} {problem}, so a launcher set for '{name}' is "
+             f"not used. `{PROG} doctor` says more.")
     var = missing_key(d)
     if var:
         info(f"{YELLOW}warning:{OFF} ${var} is not set in this shell, and '{name}' reads its key from it.")
@@ -1679,12 +1727,13 @@ def _toml(value: str) -> str:
 def _endpoint(url: str, azure: bool) -> str:
     try:
         u = urllib.parse.urlsplit(url.strip())
-        _ = u.port  # raises for a port that is not a number
     except ValueError:
         die("that is not an endpoint address: check the host and the port.", USAGE_EXIT)
     if "@" in u.netloc:
         die("the address has a user name or password in it. Keep the key in an environment variable, "
             "named with --env-key.", USAGE_EXIT)
+    if not host_port_ok(u.netloc):
+        die("that is not an endpoint address: check the host and the port.", USAGE_EXIT)
     if u.scheme not in ("http", "https") or not u.netloc or u.query or u.fragment:
         die("that is not an endpoint address: use http or https, with no ?query part.", USAGE_EXIT)
     path = u.path.rstrip("/")
@@ -1728,7 +1777,7 @@ def provider_add(argv: list[str]):
             USAGE_EXIT)
     if a.launcher:
         check_launcher(a.launcher)
-        read_json(PROVIDER_SETTINGS)  # stops now if providers.json is broken, before a profile is written
+        strict_provider_settings()  # stops now if providers.json is unusable, before a profile is written
 
     lines = [f"{MADE_BY} ({PROG} provider add {name}). `codex --profile {name}` reads it; edit it freely."]
     if a.bedrock:
@@ -1854,7 +1903,7 @@ def provider_rm(name: str | None, yes: bool = False):
     if not first.startswith(MADE_BY):
         die(f"{path} was not written by {PROG}, so it is yours to delete; "
             f"`{PROG}` stops listing it once it is gone.")
-    read_json(PROVIDER_SETTINGS)  # stops now if providers.json is broken, before anything is deleted
+    strict_provider_settings()  # stops now if providers.json is unusable, before anything is deleted
     if not confirm(f"delete provider '{name}' ({path})?", yes):
         die("aborted")
     os.remove(path)
@@ -2883,6 +2932,10 @@ def cmd_doctor(fix=False, as_json=False, **_):
         if problem:
             note("warn", f"provider '{n}' has an env_key that {problem}, so {PROG} does not list it or check "
                          f"that it is set. If that value is a key, take it out of {profile_path(n)}")
+    problem = settings_problem()
+    if problem:
+        note("warn", f"{PROVIDER_SETTINGS} {problem}, so launchers set with `{PROG} provider set` are not "
+                     f"used, and `provider add`, `set` and `rm` will not change it. Repair or delete it")
     if pptr in provs:
         var = missing_key(provider_details(pptr))
         if var:

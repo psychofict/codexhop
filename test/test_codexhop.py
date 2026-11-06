@@ -1065,9 +1065,47 @@ class Providers(Base):
             self.assertIsNone(self.providers()["hand"]["baseUrl"], bad)
 
     def test_a_host_with_non_ascii_letters_is_shown(self):
-        url = "https://b\u00fccher.example/v1/caf\u00e9"
-        self.profile("hand", AZURE_PROFILE.replace("https://res-a.openai.azure.com/openai/v1", url))
-        self.assertEqual(self.providers()["hand"]["baseUrl"], url)
+        # letters, and letters with combining marks, are what an internationalised name is made of
+        for host in ("b\u00fccher.example", "\u4f8b\u3048.jp", "cafe\u0301.example"):
+            url = f"https://{host}/v1/caf\u00e9"
+            self.profile("hand", AZURE_PROFILE.replace("https://res-a.openai.azure.com/openai/v1", url))
+            self.assertEqual(self.providers()["hand"]["baseUrl"], url, host)
+            p = self.run_tool("provider", "add", "idn", "--base-url", f"https://{host}/v1")
+            self.assertIn(host, p.stdout)
+            self.run_tool("provider", "rm", "idn", "-y")
+
+    def test_a_colon_look_alike_in_a_host_is_not_shown_or_written(self):
+        # U+2236 and U+A789 are not folded to ":" by urlsplit, so a password could hide after them
+        for mark in ("\u2236", "\ua789", "\uff1a", "\u2215"):
+            bad = f"https://res-a.openai.azure.com{mark}PWSECRET/openai/v1"
+            self.profile("hand", AZURE_PROFILE.replace("https://res-a.openai.azure.com/openai/v1", bad))
+            self.assertNotIn("PWSECRET", self.all_output("hand"), mark)
+            self.assertIsNone(self.providers()["hand"]["baseUrl"], mark)
+            p = self.run_tool("provider", "add", "x", "--base-url", bad, code=2)
+            self.assertNotIn("PWSECRET", p.stdout + p.stderr)
+            self.assertIn("host and the port", p.stderr)
+        self.assertFalse(os.path.exists(os.path.join(self.codex_home, "x.config.toml")))
+
+    def test_an_address_with_a_port_but_no_host_is_refused_and_not_shown(self):
+        for bad in ("https://:80/v1", "https://:/v1"):
+            self.profile("hand", AZURE_PROFILE.replace("https://res-a.openai.azure.com/openai/v1", bad))
+            self.assertIsNone(self.providers()["hand"]["baseUrl"], bad)
+            p = self.run_tool("provider", "add", "x", "--base-url", bad, code=2)
+            self.assertIn("host and the port", p.stderr, bad)
+        self.assertFalse(os.path.exists(os.path.join(self.codex_home, "x.config.toml")))
+
+    def test_only_a_plain_port_in_range_is_shown_or_written(self):
+        # Python 3.9 reads "+80" and "1_0" as ports; a port is digits, 0 to 65535, and at most one
+        for port in ("+80", "1_0", "80:90", "65536", "-1", "0x50", "PWSECRET", "\u0668\u0660"):
+            bad = f"https://res-a.openai.azure.com:{port}/openai/v1"
+            self.profile("hand", AZURE_PROFILE.replace("https://res-a.openai.azure.com/openai/v1", bad))
+            self.assertIsNone(self.providers()["hand"]["baseUrl"], port)
+            p = self.run_tool("provider", "add", "x", "--base-url", bad, code=2)
+            self.assertIn("host and the port", p.stderr, port)
+        self.assertFalse(os.path.exists(os.path.join(self.codex_home, "x.config.toml")))
+        for good in ("https://h:65535/v1", "https://h:8080/v1", "http://[::1]:11434/v1", "https://h:/v1"):
+            self.profile("hand", AZURE_PROFILE.replace("https://res-a.openai.azure.com/openai/v1", good))
+            self.assertEqual(self.providers()["hand"]["baseUrl"], good)
 
     def test_add_refuses_a_port_that_is_not_a_number_and_writes_nothing(self):
         p = self.run_tool("provider", "add", "x", "--base-url", "https://h:PWSECRET/v1", code=2)
@@ -1109,6 +1147,71 @@ class Providers(Base):
             self.assertEqual(self.text(path), text)  # not rewritten with the new entry alone
             self.assertTrue(os.path.exists(os.path.join(self.codex_home, "mine.config.toml")))  # not deleted
             self.assertFalse(os.path.exists(os.path.join(self.codex_home, "new.config.toml")))  # not written
+
+    def test_a_providers_file_that_cannot_be_used_stops_every_change(self):
+        # not UTF-8, a JSON list, and a directory where the file should be
+        path = os.path.join(self.store, "providers.json")
+        self.run_tool("provider", "add", "mine", "--bedrock", "--launcher", "codex --one")
+
+        def raw() -> bytes | None:
+            if os.path.isdir(path):
+                return None
+            with open(path, "rb") as f:
+                return f.read()
+
+        for kind in ("bytes", "list", "dir"):
+            if os.path.isdir(path):
+                os.rmdir(path)
+            elif os.path.exists(path):
+                os.remove(path)
+            if kind == "dir":
+                os.mkdir(path)
+            else:
+                with open(path, "wb") as f:
+                    f.write(b'{"mine": {"launcher": "\xff\xfe"}}' if kind == "bytes"
+                            else b'[{"launcher": "codex --one"}]')
+            before = raw()
+            for args in (("provider", "set", "mine", "--launcher", "codex --three"),
+                         ("provider", "rm", "mine", "-y"),
+                         ("provider", "add", "new", "--bedrock", "--launcher", "codex --four")):
+                p = self.run_tool(*args, code=1)
+                self.assertIn("Refusing to touch it", p.stderr, (kind, args))
+                self.assertNotIn("Traceback", p.stderr, (kind, args))
+            self.assertEqual(raw(), before, kind)  # not rewritten
+            self.assertEqual(os.path.isdir(path), kind == "dir", kind)
+            self.assertTrue(os.path.exists(os.path.join(self.codex_home, "mine.config.toml")), kind)
+            self.assertFalse(os.path.exists(os.path.join(self.codex_home, "new.config.toml")), kind)
+            for args in (("provider", "list"), ("provider", "list", "--json"), ("list", "--json")):
+                p = self.run_tool(*args, code=None)
+                self.assertNotIn("Traceback", p.stderr, (kind, args))
+                self.assertEqual(p.returncode, 0, (kind, args))
+
+    def test_a_run_and_doctor_say_when_the_providers_file_cannot_be_used(self):
+        self.profile("az")
+        for args in (("run", "az"), ("launch", "--")):
+            self.run_tool("az")
+            self.assertNotIn("cannot be read", self.run_tool(*args).stderr)  # no file: nothing to say
+        self.assertNotIn("providers.json", self.run_tool("doctor", code=None).stdout)
+        path = os.path.join(self.store, "providers.json")
+        trailing_comma = '{"az": {"launcher": "codex --via-launcher",}}'
+        for text, why in ((trailing_comma, "cannot be read (JSONDecodeError)"),
+                          ('["x"]', "is not a JSON object")):
+            with open(path, "w") as f:
+                f.write(text)
+            for args in (("run", "az"), ("launch", "--")):
+                self.run_tool("az")
+                p = self.run_tool(*args)
+                self.assertIn(f"providers.json {why}, so a launcher set for 'az' is not used", p.stderr, args)
+                self.assertEqual(self.codex_calls()[-1]["argv"][:2], ["--profile", "az"])  # no launcher ran
+            out = self.run_tool("doctor", code=None).stdout
+            self.assertIn(f"providers.json {why}, so launchers set with `codexhop provider set` are not "
+                          f"used", out)
+            self.assertNotIn("codex --via-launcher", out)
+        with open(path, "w") as f:
+            f.write('{"az": {"launcher": "codex --via-launcher"}}')
+        self.assertNotIn("providers.json", self.run_tool("doctor", code=None).stdout)
+        self.run_tool("az")
+        self.assertNotIn("not used", self.run_tool("launch", "--").stderr)
 
     def test_an_unknown_option_is_named_without_its_value(self):
         value = "sk-test-" + "zZ9" * 10
