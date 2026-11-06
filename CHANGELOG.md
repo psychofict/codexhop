@@ -18,7 +18,8 @@ All notable changes to codexhop are listed here. The format follows
   file. `chop provider [list]`, `set` and `rm` list, change and delete providers.
   No key is stored by codexhop. `--env-key` refuses a value that is not a
   variable name or looks like a key, an option it does not know is reported by
-  name without its value, and a listing leaves out a key-like `env_key`, an
+  name without its value (a mistyped command or name is still repeated back),
+  and a listing leaves out a key-like `env_key`, an
   address's user name, password and query, and masks a key-like `NAME=value` in a
   launcher.
 - `chop run <provider>` runs Codex on a provider in one terminal.

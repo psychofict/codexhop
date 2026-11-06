@@ -206,7 +206,7 @@ def read_json(path: str) -> dict:
             return data if isinstance(data, dict) else {}
         except FileNotFoundError:
             return {}
-        except json.JSONDecodeError as e:
+        except (json.JSONDecodeError, RecursionError) as e:
             if attempt == 2:
                 die(f"{path} is not valid JSON ({e}). Refusing to touch it.")
             time.sleep(0.2)
@@ -218,7 +218,7 @@ def peek_json(path: str) -> dict:
     try:
         with open(path) as f:
             data = json.load(f)
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return {}
     return data if isinstance(data, dict) else {}
 
@@ -1419,7 +1419,7 @@ def provider_settings() -> dict:
 
 
 def set_provider_setting(name: str, key: str, value: str | None):
-    data = provider_settings()
+    data = read_json(PROVIDER_SETTINGS)  # stops if it will not parse, rather than dropping every launcher
     entry = dict(data[name]) if isinstance(data.get(name), dict) else {}
     if value:
         entry[key] = value
@@ -1467,8 +1467,6 @@ def shown_url(url: str | None) -> str | None:
         host = u.netloc.rsplit("@", 1)[-1]
         if not host:  # "https:////user:pw@host" has no host: the user name and password are in the path
             return None
-        if not u.netloc.isascii():  # some Pythons read a look-alike of @ or / in a host as the real one
-            return None
         _ = u.port  # raises for a port that is not a number: that may be a password
         out = urllib.parse.urlunsplit((u.scheme, host, u.path, "", ""))
         urllib.parse.urlsplit(out)  # provider_where splits it again, so make sure that cannot fail
@@ -1506,7 +1504,7 @@ def provider_details(name: str) -> dict:
         "envKey": None if env_key and env_name_problem(env_key) else env_key,
         "region": table_value(path, table + ".aws", "region"),
         "awsProfile": table_value(path, table + ".aws", "profile"),
-        "launcher": launcher if isinstance(launcher, str) else None,
+        "launcher": launcher if isinstance(launcher, str) and launcher.strip() else None,
     }
 
 
@@ -1665,8 +1663,9 @@ def _toml(value: str) -> str:
 def _endpoint(url: str, azure: bool) -> str:
     try:
         u = urllib.parse.urlsplit(url.strip())
+        _ = u.port  # raises for a port that is not a number
     except ValueError:
-        die("that is not an endpoint address: use http or https, with no ?query part.", USAGE_EXIT)
+        die("that is not an endpoint address: check the host and the port.", USAGE_EXIT)
     if "@" in u.netloc:
         die("the address has a user name or password in it. Keep the key in an environment variable, "
             "named with --env-key.", USAGE_EXIT)
@@ -1713,6 +1712,7 @@ def provider_add(argv: list[str]):
             USAGE_EXIT)
     if a.launcher:
         check_launcher(a.launcher)
+        read_json(PROVIDER_SETTINGS)  # stops now if providers.json is broken, before a profile is written
 
     lines = [f"{MADE_BY} ({PROG} provider add {name}). `codex --profile {name}` reads it; edit it freely."]
     if a.bedrock:
@@ -1759,12 +1759,16 @@ def provider_add(argv: list[str]):
 
 def _secret_assignment(word: str) -> str | None:
     """The variable name in a NAME=value word whose name says the value is a key, else None."""
-    m = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)=(.+)$", word)
-    if m and re.search(r"KEY|TOKEN|SECRET|PASSW|CREDENTIAL|AUTH", m.group(1), re.I) \
-            and not re.search(r"_(FILE|PATH)$", m.group(1), re.I) \
-            and not m.group(2).startswith(("/", "~/", "./")):  # a path, as in GOOGLE_APPLICATION_CREDENTIALS
-        return m.group(1)
-    return None
+    m = re.fullmatch(r"([A-Za-z_][A-Za-z0-9_]*)=(.+)", word, re.S)
+    if not m or not re.search(r"KEY|TOKEN|SECRET|PASSW|CREDENTIAL|AUTH", m.group(1), re.I):
+        return None
+    if re.search(r"_(FILE|PATH)$", m.group(1), re.I):
+        return None
+    # A path is not a key: GOOGLE_APPLICATION_CREDENTIALS=/home/me/key.json, SSH_AUTH_SOCK=./sock.
+    # Not for a name with KEY, TOKEN or SECRET in it: AWS_SECRET_ACCESS_KEY=/... is still refused.
+    if m.group(2).startswith(("/", "~/", "./")) and not re.search(r"KEY|TOKEN|SECRET", m.group(1), re.I):
+        return None
+    return m.group(1)
 
 
 def launcher_secrets(command: str) -> list[str]:
@@ -1832,6 +1836,7 @@ def provider_rm(name: str | None, yes: bool = False):
     if not first.startswith(MADE_BY):
         die(f"{path} was not written by {PROG}, so it is yours to delete; "
             f"`{PROG}` stops listing it once it is gone.")
+    read_json(PROVIDER_SETTINGS)  # stops now if providers.json is broken, before anything is deleted
     if not confirm(f"delete provider '{name}' ({path})?", yes):
         die("aborted")
     os.remove(path)

@@ -1056,18 +1056,29 @@ class Providers(Base):
             self.assertNotIn("PWSECRET", self.all_output("hand"), bad)
             self.assertIsNone(self.providers()["hand"]["baseUrl"])
 
-    def test_an_address_with_an_odd_host_or_port_is_not_shown(self):
-        # a "port" that is not a number may be a password; a host that is not ASCII may hide an @ or a /
+    def test_an_address_with_an_odd_port_or_look_alike_is_not_shown(self):
+        # a "port" that is not a number may be a password; urlsplit rejects a full-width @ in a host
         for bad in ("https://res-a.openai.azure.com:PWSECRET/openai/v1",
-                    "https://user:PWSECRET\uff20res-a.openai.azure.com/openai/v1",
-                    "https://b\u00fccher.example/v1"):
+                    "https://user:PWSECRET\uff20res-a.openai.azure.com/openai/v1"):
             self.profile("hand", AZURE_PROFILE.replace("https://res-a.openai.azure.com/openai/v1", bad))
             self.assertNotIn("PWSECRET", self.all_output("hand"), bad)
             self.assertIsNone(self.providers()["hand"]["baseUrl"], bad)
 
+    def test_a_host_with_non_ascii_letters_is_shown(self):
+        url = "https://b\u00fccher.example/v1/caf\u00e9"
+        self.profile("hand", AZURE_PROFILE.replace("https://res-a.openai.azure.com/openai/v1", url))
+        self.assertEqual(self.providers()["hand"]["baseUrl"], url)
+
+    def test_add_refuses_a_port_that_is_not_a_number_and_writes_nothing(self):
+        p = self.run_tool("provider", "add", "x", "--base-url", "https://h:PWSECRET/v1", code=2)
+        self.assertNotIn("PWSECRET", p.stdout + p.stderr)
+        self.assertIn("host and the port", p.stderr)
+        self.assertFalse(os.path.exists(os.path.join(self.codex_home, "x.config.toml")))
+
     def test_a_providers_file_of_the_wrong_shape_does_not_crash_anything(self):
         self.profile("az")
-        for entry in ({"launcher": 5}, {"launcher": ["codex"]}, {"launcher": True}, 5, ["x"], "codex"):
+        for entry in ({"launcher": 5}, {"launcher": ["codex"]}, {"launcher": True}, {"launcher": "   "},
+                      {"launcher": "\n"}, 5, ["x"], "codex"):
             with open(os.path.join(self.store, "providers.json"), "w") as f:
                 json.dump({"az": entry}, f)
             for args in (("provider", "list"), ("provider", "list", "--json"), ("list", "--json"),
@@ -1075,20 +1086,42 @@ class Providers(Base):
                 p = self.run_tool(*args, code=None)
                 self.assertNotIn("Traceback", p.stderr, (entry, args))
             self.assertIsNone(self.providers()["az"]["launcher"], entry)
+            self.run_tool("run", "az")  # a blank launcher is no launcher: codex runs on the profile
+            self.assertEqual(self.codex_calls()[-1]["argv"], ["--profile", "az"], entry)
             self.run_tool("provider", "set", "az", "--launcher", "codex --via-launcher")  # replaces it
             self.assertEqual(self.providers()["az"]["launcher"], "codex --via-launcher", entry)
 
+    def test_a_providers_file_that_will_not_parse_is_never_overwritten(self):
+        path = os.path.join(self.store, "providers.json")
+        self.run_tool("provider", "add", "mine", "--bedrock", "--launcher", "codex --one")
+        self.run_tool("provider", "add", "other", "--bedrock", "--launcher", "codex --two")
+        broken = self.text(path).rstrip().rstrip("}") + ",}"  # a trailing comma
+        for text in (broken, "[" * 300000):  # and one nested too deeply to read
+            with open(path, "w") as f:
+                f.write(text)
+            self.assertEqual(self.run_tool("provider", "list", code=0).returncode, 0)
+            for args in (("provider", "set", "mine", "--launcher", "codex --three"),
+                         ("provider", "rm", "mine", "-y"),
+                         ("provider", "add", "new", "--bedrock", "--launcher", "codex --four")):
+                p = self.run_tool(*args, code=1)
+                self.assertIn("Refusing to touch it", p.stderr, args)
+                self.assertNotIn("Traceback", p.stderr, args)
+            self.assertEqual(self.text(path), text)  # not rewritten with the new entry alone
+            self.assertTrue(os.path.exists(os.path.join(self.codex_home, "mine.config.toml")))  # not deleted
+            self.assertFalse(os.path.exists(os.path.join(self.codex_home, "new.config.toml")))  # not written
+
     def test_an_unknown_option_is_named_without_its_value(self):
         value = "sk-test-" + "zZ9" * 10
-        p = self.run_tool("list", f"--api-key={value}", code=2)
-        self.assertNotIn(value, p.stdout + p.stderr)
-        self.assertIn("unknown option '--api-key'", p.stderr)
+        for opt in (f"--api-key={value}", f"-k={value}"):
+            p = self.run_tool("list", opt, code=2)
+            self.assertNotIn(value, p.stdout + p.stderr)
+            self.assertIn(f"unknown option '{opt.split('=')[0]}'", p.stderr)
 
     def test_doctor_does_not_say_codex_finds_no_key_for_a_name_it_only_hides(self):
         self.profile("hand", AZURE_PROFILE.replace('"AZURE_OPENAI_API_KEY"', '"AzureKey"'))
         out = self.run_tool("doctor").stdout
         self.assertIn("provider 'hand' has an env_key that looks like a key", out)
-        self.assertIn("does not list it or check that it is set", out)
+        self.assertIn("does not list it or check that it is set. If that value is a key, take it out of", out)
         self.assertNotIn("find no key", out)
 
     def test_a_malformed_address_does_not_crash_anything(self):
@@ -1124,7 +1157,12 @@ class Providers(Base):
                          f"env X=1 AWS_BEARER_TOKEN_BEDROCK={value} codex",
                          # each of these names matches one word of the rule and no other
                          f"env MY_AUTH={value} codex", f"env APP_SECRET={value} codex",
-                         f"env DB_PASSWD={value} codex", f"env CLOUD_CREDENTIALS={value} codex"):
+                         f"env DB_PASSWD={value} codex", f"env CLOUD_CREDENTIALS={value} codex",
+                         # a path excuses a name with no KEY, TOKEN or SECRET in it, and nothing else
+                         f"env AWS_SECRET_ACCESS_KEY=/{value} codex", f"env X_TOKEN=./{value} codex",
+                         f"env APP_AUTH=~{value} codex", f"env APP_AUTH=.{value} codex",
+                         # a value can run over several lines
+                         "env " + shlex.quote('GOOGLE_CREDENTIALS={"k":\n"' + value + '"}') + " codex"):
             p = self.run_tool("provider", "set", "az", "--launcher", launcher, code=2)
             self.assertNotIn(value, p.stdout + p.stderr)
             self.assertRegex(p.stderr, r"sets \w+ to a value")
@@ -1137,7 +1175,8 @@ class Providers(Base):
         self.profile("az")
         for launcher in ("env CODEX_AZURE_PROFILE=azure-agents codex", "env AZURE_KEY_FILE=k.txt codex",
                          "env GOOGLE_APPLICATION_CREDENTIALS=/home/me/key.json codex",
-                         "env SSH_AUTH_SOCK=./sock codex", "env PASSWORD_STORE_DIR=~/pw codex"):
+                         "env SSH_AUTH_SOCK=./sock codex", "env PASSWORD_STORE_DIR=~/pw codex",
+                         "env AZURE_OPENAI_API_KEY= codex"):  # nothing after the = to hide
             self.run_tool("provider", "set", "az", "--launcher", launcher)
             self.assertEqual(self.providers()["az"]["launcher"], launcher)
         self.run_tool("az")

@@ -105,6 +105,9 @@ Codex has built in (`openai`, `amazon-bedrock`, `ollama`, `lmstudio`, `gcp`).
 
 codexhop writes no key into the file and keeps none. An option it does not know
 is reported by name only, so `--api-key sk-...` typed by mistake is not echoed.
+That covers an option typed where options go. A command or a name it does not
+know is repeated back in the error, and so is an option typed in the place of
+one, so never type a key there.
 
 ### `chop provider [list]`
 
@@ -124,12 +127,14 @@ and the `codex` function run `COMMAND <arguments>` instead of
 Keep the key out of the command. A launcher that sets a variable whose name
 contains `KEY`, `TOKEN`, `SECRET`, `PASSW`, `CREDENTIAL` or `AUTH` to a value,
 as in `env AZURE_OPENAI_API_KEY=... codex`, is refused, because the launcher is
-saved and listed. Names that end in `_FILE` or `_PATH` are fine, and so is a
-value that is a path, such as `GOOGLE_APPLICATION_CREDENTIALS=/home/me/key.json`
-(it starts with `/`, `~/` or `./`), and so is
-`env CODEX_AZURE_PROFILE=azure-agents codex-azure`. The check reads variable
-names and the start of the value only; a key passed as an ordinary argument is
-not recognised.
+saved and listed. Names that end in `_FILE` or `_PATH` are fine, and so is
+`env CODEX_AZURE_PROFILE=azure-agents codex-azure`. So is a value that is a path
+(it starts with `/`, `~/` or `./`) when the name has none of `KEY`, `TOKEN` and
+`SECRET` in it, as in `GOOGLE_APPLICATION_CREDENTIALS=/home/me/key.json`;
+`AWS_SECRET_ACCESS_KEY=/...` is still refused. The check reads variable names and
+the start of the value only. A key passed as an ordinary argument is not
+recognised, and neither is one that starts with `/`, `~/` or `./` under a name
+such as `GOOGLE_CREDENTIALS`.
 
 ### `chop provider rm <name>`, `chop rm <name>`
 
@@ -320,8 +325,8 @@ Everything lives in `$CODEX_HOME/codexhop/`:
 `chop list --json` returns `{"codexHome", "active", "provider", "accounts": [...],
 "providers": [...]}`. Each provider has `name`, `active`, `provider`, `model`,
 `baseUrl` (no user name, password, `?query` or `#fragment`, with the path as
-written; `null` when the address has no host or a non-ASCII one, has a port that
-is not a number, or does not parse), `region`, `awsProfile`, `envKey` (the variable's name;
+written; `null` when the address has no host, has a port that is not a number,
+or does not parse), `region`, `awsProfile`, `envKey` (the variable's name;
 `null` when the profile's value looks like a key), `launcher` (a key-looking
 `NAME=value` shows as `NAME=***`; `null` when it is not a command) and `file`. Each account has `name`, `active`, `kind` (`chatgpt` or
 `apikey`), `email`, `plan`, `userId`, `workspaceId`, `expiresAt` and
