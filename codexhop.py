@@ -1420,7 +1420,7 @@ def provider_settings() -> dict:
 
 def set_provider_setting(name: str, key: str, value: str | None):
     data = provider_settings()
-    entry = dict(data.get(name) or {})
+    entry = dict(data[name]) if isinstance(data.get(name), dict) else {}
     if value:
         entry[key] = value
     else:
@@ -1467,6 +1467,9 @@ def shown_url(url: str | None) -> str | None:
         host = u.netloc.rsplit("@", 1)[-1]
         if not host:  # "https:////user:pw@host" has no host: the user name and password are in the path
             return None
+        if not u.netloc.isascii():  # some Pythons read a look-alike of @ or / in a host as the real one
+            return None
+        _ = u.port  # raises for a port that is not a number: that may be a password
         out = urllib.parse.urlunsplit((u.scheme, host, u.path, "", ""))
         urllib.parse.urlsplit(out)  # provider_where splits it again, so make sure that cannot fail
     except ValueError:  # e.g. "http://[bad": show nothing rather than guess what is safe
@@ -1495,13 +1498,15 @@ def provider_details(name: str) -> dict:
     pid = config_value("model_provider", path)
     table = f"model_providers.{pid}"
     env_key = table_value(path, table, "env_key")
+    entry = provider_settings().get(name)
+    launcher = entry.get("launcher") if isinstance(entry, dict) else None  # providers.json may be hand-edited
     return {
         "name": name, "provider": pid, "model": config_value("model", path), "file": path,
         "baseUrl": shown_url(table_value(path, table, "base_url")),
         "envKey": None if env_key and env_name_problem(env_key) else env_key,
         "region": table_value(path, table + ".aws", "region"),
         "awsProfile": table_value(path, table + ".aws", "profile"),
-        "launcher": (provider_settings().get(name) or {}).get("launcher"),
+        "launcher": launcher if isinstance(launcher, str) else None,
     }
 
 
@@ -1754,9 +1759,10 @@ def provider_add(argv: list[str]):
 
 def _secret_assignment(word: str) -> str | None:
     """The variable name in a NAME=value word whose name says the value is a key, else None."""
-    m = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)=.", word)
+    m = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)=(.+)$", word)
     if m and re.search(r"KEY|TOKEN|SECRET|PASSW|CREDENTIAL|AUTH", m.group(1), re.I) \
-            and not re.search(r"_(FILE|PATH)$", m.group(1), re.I):
+            and not re.search(r"_(FILE|PATH)$", m.group(1), re.I) \
+            and not m.group(2).startswith(("/", "~/", "./")):  # a path, as in GOOGLE_APPLICATION_CREDENTIALS
         return m.group(1)
     return None
 
@@ -2852,8 +2858,8 @@ def cmd_doctor(fix=False, as_json=False, **_):
         raw = table_value(profile_path(n), f"model_providers.{provider_details(n)['provider']}", "env_key")
         problem = env_name_problem(raw) if raw else None
         if problem:
-            note("warn", f"provider '{n}' has an env_key that {problem}, so Codex will find no key there, "
-                         f"and a key may be written in {profile_path(n)}")
+            note("warn", f"provider '{n}' has an env_key that {problem}, so {PROG} does not list it or check "
+                         f"that it is set. If that value is a key, take it out of {profile_path(n)}")
     if pptr in provs:
         var = missing_key(provider_details(pptr))
         if var:
@@ -3088,7 +3094,7 @@ def main(argv: list[str]):
         elif a in FLAGS:
             flags[FLAGS[a]] = True
         elif a.startswith("-") and a not in COMMANDS:
-            die(f"unknown option '{a}'. Try: {PROG} help", USAGE_EXIT)
+            die(f"unknown option '{a.split('=', 1)[0]}'. Try: {PROG} help", USAGE_EXIT)  # never the value
         else:
             args.append(a)
 

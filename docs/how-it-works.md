@@ -220,12 +220,16 @@ environment first.
 
 What codexhop prints about a provider is filtered by shape, not by knowing the
 key. A variable name is accepted only if it is one case, has at most four digits,
-is at most 40 characters and, past 24, contains an underscore. An address is shown without its user name,
-password, query and fragment, and not at all if that cannot be done safely. A
+is at most 40 characters and, past 24, contains an underscore. An address is
+shown without its user name, password, query and fragment. It is not shown at all
+if it has no host, a host that is not plain ASCII, a port that is not a number,
+or does not parse. Its path is shown as written, so keep a key out of it. A
 launcher's `NAME=value` word is masked when the name contains `KEY`, `TOKEN`,
-`SECRET`, `PASSW`, `CREDENTIAL` or `AUTH`. These catch the usual mistakes. A key
-that matches none of these shapes, written by hand into a profile or passed to a
-launcher as an ordinary argument, would still be listed.
+`SECRET`, `PASSW`, `CREDENTIAL` or `AUTH`, unless the name ends in `_FILE` or
+`_PATH` or the value is a path (it starts with `/`, `~/` or `./`). These catch
+the usual mistakes. A key that matches none of these shapes, written by hand into
+a profile, into an address path, or passed to a launcher as an ordinary argument,
+would still be listed.
 
 Checked on 6 November 2026 with Codex 0.166.0 started through the real function
 after a hop: the header showed the Azure profile's model, and for a Bedrock

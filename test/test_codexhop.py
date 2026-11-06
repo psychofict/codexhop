@@ -1056,6 +1056,41 @@ class Providers(Base):
             self.assertNotIn("PWSECRET", self.all_output("hand"), bad)
             self.assertIsNone(self.providers()["hand"]["baseUrl"])
 
+    def test_an_address_with_an_odd_host_or_port_is_not_shown(self):
+        # a "port" that is not a number may be a password; a host that is not ASCII may hide an @ or a /
+        for bad in ("https://res-a.openai.azure.com:PWSECRET/openai/v1",
+                    "https://user:PWSECRET\uff20res-a.openai.azure.com/openai/v1",
+                    "https://b\u00fccher.example/v1"):
+            self.profile("hand", AZURE_PROFILE.replace("https://res-a.openai.azure.com/openai/v1", bad))
+            self.assertNotIn("PWSECRET", self.all_output("hand"), bad)
+            self.assertIsNone(self.providers()["hand"]["baseUrl"], bad)
+
+    def test_a_providers_file_of_the_wrong_shape_does_not_crash_anything(self):
+        self.profile("az")
+        for entry in ({"launcher": 5}, {"launcher": ["codex"]}, {"launcher": True}, 5, ["x"], "codex"):
+            with open(os.path.join(self.store, "providers.json"), "w") as f:
+                json.dump({"az": entry}, f)
+            for args in (("provider", "list"), ("provider", "list", "--json"), ("list", "--json"),
+                         ("doctor",)):
+                p = self.run_tool(*args, code=None)
+                self.assertNotIn("Traceback", p.stderr, (entry, args))
+            self.assertIsNone(self.providers()["az"]["launcher"], entry)
+            self.run_tool("provider", "set", "az", "--launcher", "codex --via-launcher")  # replaces it
+            self.assertEqual(self.providers()["az"]["launcher"], "codex --via-launcher", entry)
+
+    def test_an_unknown_option_is_named_without_its_value(self):
+        value = "sk-test-" + "zZ9" * 10
+        p = self.run_tool("list", f"--api-key={value}", code=2)
+        self.assertNotIn(value, p.stdout + p.stderr)
+        self.assertIn("unknown option '--api-key'", p.stderr)
+
+    def test_doctor_does_not_say_codex_finds_no_key_for_a_name_it_only_hides(self):
+        self.profile("hand", AZURE_PROFILE.replace('"AZURE_OPENAI_API_KEY"', '"AzureKey"'))
+        out = self.run_tool("doctor").stdout
+        self.assertIn("provider 'hand' has an env_key that looks like a key", out)
+        self.assertIn("does not list it or check that it is set", out)
+        self.assertNotIn("find no key", out)
+
     def test_a_malformed_address_does_not_crash_anything(self):
         # the second address splits fine until its user name is cut off, which leaves "http://[aa::1"
         for bad in ("http://[bad", "http://]a::1x@[aa::1"):
@@ -1086,7 +1121,10 @@ class Providers(Base):
         value = "sk-test-" + "zZ9" * 10
         self.profile("az")
         for launcher in (f"env AZURE_OPENAI_API_KEY={value} codex", f"env my_token='{value}' codex",
-                         f"env X=1 AWS_BEARER_TOKEN_BEDROCK={value} codex"):
+                         f"env X=1 AWS_BEARER_TOKEN_BEDROCK={value} codex",
+                         # each of these names matches one word of the rule and no other
+                         f"env MY_AUTH={value} codex", f"env APP_SECRET={value} codex",
+                         f"env DB_PASSWD={value} codex", f"env CLOUD_CREDENTIALS={value} codex"):
             p = self.run_tool("provider", "set", "az", "--launcher", launcher, code=2)
             self.assertNotIn(value, p.stdout + p.stderr)
             self.assertRegex(p.stderr, r"sets \w+ to a value")
@@ -1097,7 +1135,9 @@ class Providers(Base):
 
     def test_a_launcher_may_set_other_variables(self):
         self.profile("az")
-        for launcher in ("env CODEX_AZURE_PROFILE=azure-agents codex", "env AZURE_KEY_FILE=/run/k codex"):
+        for launcher in ("env CODEX_AZURE_PROFILE=azure-agents codex", "env AZURE_KEY_FILE=k.txt codex",
+                         "env GOOGLE_APPLICATION_CREDENTIALS=/home/me/key.json codex",
+                         "env SSH_AUTH_SOCK=./sock codex", "env PASSWORD_STORE_DIR=~/pw codex"):
             self.run_tool("provider", "set", "az", "--launcher", launcher)
             self.assertEqual(self.providers()["az"]["launcher"], launcher)
         self.run_tool("az")

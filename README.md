@@ -129,9 +129,9 @@ handles: `--env-key` refuses a value that looks like a key instead of a variable
 name, and `provider set` refuses a launcher that sets a variable such as
 `..._KEY` or `..._TOKEN`. When it lists a profile or launcher you wrote by hand,
 it leaves out a key-like `env_key`, an address's user name, password, `?query`
-and `#fragment`, and shows a key-like `NAME=value` as `NAME=***`. That catches the
-common mistakes. It cannot recognise every key, so a secret you write into a
-file yourself is still in that file.
+and `#fragment`, and shows a key-like `NAME=value` as `NAME=***`. An address's
+path is shown as written. That catches the common mistakes. It cannot recognise
+every key, so a secret you write into a file yourself is still in that file.
 
 Codex 0.166 has no setting that picks a default profile, so a hop to a provider
 cannot change a file Codex reads when it starts. codexhop keeps a pointer, and
