@@ -6,6 +6,8 @@ All notable changes to codexhop are listed here. The format follows
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-11-09
+
 ### Added
 
 - Hop to Azure OpenAI, Amazon Bedrock or another endpoint that speaks the

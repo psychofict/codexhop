@@ -92,7 +92,7 @@ import time
 import unicodedata
 import urllib.parse
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 PROG = "codexhop"
 DEFAULT_ALIAS = "chop"
 
