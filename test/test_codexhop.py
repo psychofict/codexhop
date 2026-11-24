@@ -277,16 +277,25 @@ class Base(unittest.TestCase):
             return []
 
     def fake_running_codex(self, home: str | None = None) -> int:
-        """A process that looks like `codex` (argv[0] ends in /codex) on this Codex home."""
+        """A process that looks like `codex` on this Codex home, as running_codex() reads it.
+
+        With /proc (Linux) running_codex() reads argv[0], so the stand-in is a link named
+        `codex` to the Python we run on. It cannot be `sleep` there: Ubuntu 26.04's Rust
+        coreutils `sleep` refuses to run under another name and exits at once. Without
+        /proc (macOS) it runs `pgrep -x codex`, which matches the process name, so the
+        link goes to `sleep`: a framework Python (setup-python's, Homebrew's) hands over to
+        Python.app's `Python` binary, and pgrep did not see it on macOS CI (24 Nov 2026).
+        """
         d = os.path.join(self.tmp, "procs", str(len(self.children)))
         os.makedirs(d)
-        # A link to the Python we run on, not to `sleep`: Ubuntu 26.04's Rust coreutils
-        # `sleep` refuses to run under another name, and the stand-in would exit at once.
-        os.symlink(sys.executable, os.path.join(d, "codex"))
-        p = subprocess.Popen(
-            [os.path.join(d, "codex"), "-c", "import time; time.sleep(60)"],
-            env={"CODEX_HOME": home or self.codex_home},
-        )
+        link = os.path.join(d, "codex")
+        if os.path.isdir("/proc"):
+            os.symlink(sys.executable, link)
+            argv = [link, "-c", "import time; time.sleep(60)"]
+        else:
+            os.symlink("/bin/sleep" if os.path.exists("/bin/sleep") else shutil.which("sleep"), link)
+            argv = [link, "60"]
+        p = subprocess.Popen(argv, env={"CODEX_HOME": home or self.codex_home})
         self.children.append(p)
         time.sleep(0.1)
         return p.pid
