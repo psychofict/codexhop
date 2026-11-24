@@ -280,8 +280,13 @@ class Base(unittest.TestCase):
         """A process that looks like `codex` (argv[0] ends in /codex) on this Codex home."""
         d = os.path.join(self.tmp, "procs", str(len(self.children)))
         os.makedirs(d)
-        os.symlink(shutil.which("sleep"), os.path.join(d, "codex"))
-        p = subprocess.Popen([os.path.join(d, "codex"), "60"], env={"CODEX_HOME": home or self.codex_home})
+        # A link to the Python we run on, not to `sleep`: Ubuntu 26.04's Rust coreutils
+        # `sleep` refuses to run under another name, and the stand-in would exit at once.
+        os.symlink(sys.executable, os.path.join(d, "codex"))
+        p = subprocess.Popen(
+            [os.path.join(d, "codex"), "-c", "import time; time.sleep(60)"],
+            env={"CODEX_HOME": home or self.codex_home},
+        )
         self.children.append(p)
         time.sleep(0.1)
         return p.pid
